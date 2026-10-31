@@ -28,7 +28,8 @@ enum BannerKind : uint8_t {
   BANNER_NOSENSOR,
   BANNER_NORX,
   BANNER_CMDRX,
-  BANNER_CFGFAIL
+  BANNER_CFGFAIL,
+  BANNER_MODE
 };
 
 struct ViewCaps {
@@ -117,6 +118,11 @@ static void uiDrawBanner(Adafruit_ILI9341 &tft, uint8_t kind) {
       bg = ILI9341_RED;
       fg = ILI9341_WHITE;
       text = F("CFG FAIL");
+      break;
+    case BANNER_MODE:
+      bg = ILI9341_YELLOW;
+      fg = ILI9341_BLACK;
+      text = F("WRONG MODE");
       break;
     default:
       break;
@@ -303,18 +309,24 @@ static void uiHeartbeat(Adafruit_ILI9341 &tft) {
 }
 
 #if FEATURE_BATTERY
-static void uiBattery(Adafruit_ILI9341 &tft, uint16_t mv, int pct, bool low) {
+static void uiBattery(Adafruit_ILI9341 &tft, uint16_t mv, int pct, bool low,
+                       bool usb) {
   // Opaque digits, padded so a shorter reading erases the previous one.
   // y 286 is 8 px tall: the bottom sits 2 px above the warn strip at y 296.
+  tft.setTextSize(1);
+  tft.setTextColor(low ? ILI9341_YELLOW : ILI9341_WHITE, ILI9341_BLACK);
+  tft.setCursor(4, 286);
+  if (usb) {
+    tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    tft.print(F("USB            "));
+    return;
+  }
   if (pct < 0) {
     pct = 0;
   }
   if (pct > 100) {
     pct = 100;
   }
-  tft.setTextSize(1);
-  tft.setTextColor(low ? ILI9341_YELLOW : ILI9341_WHITE, ILI9341_BLACK);
-  tft.setCursor(4, 286);
   tft.print(mv / 1000);
   tft.print('.');
   tft.print((mv / 100) % 10);
@@ -327,7 +339,7 @@ static void uiBattery(Adafruit_ILI9341 &tft, uint16_t mv, int pct, bool low) {
   }
   tft.print(pct);
   tft.print('%');
-  tft.print(low ? F(" LOW") : F("    "));
+  tft.print(low ? F(" LOW ") : F("     "));
 }
 #endif
 

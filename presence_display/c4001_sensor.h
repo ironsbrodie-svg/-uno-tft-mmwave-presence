@@ -19,6 +19,9 @@
 #ifndef RADAR_TX_PIN
 #define RADAR_TX_PIN 7
 #endif
+#ifndef RADAR_RX_ONLY
+#define RADAR_RX_ONLY 0
+#endif
 
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -843,7 +846,7 @@ inline bool C4001Sensor::configure() {
   startModule();
   _len = 0;
   _knowMode = false;
-  const bool sawFrame = waitFrame(1500);
+  const bool sawFrame = waitFrame(3000);
   if (!sawFrame || _speedMode != _ranging) {
     _unverified = true;
     if (_fault == 0) {
@@ -875,8 +878,9 @@ inline bool C4001Sensor::read(TargetFix &fix) {
   if (!parseFrame(line, fix)) {
     return false;
   }
+#if !RADAR_RX_ONLY
   // Wrong-mode frames must not refresh the link timer. After
-  // LINK_TIMEOUT_MS the sketch drops to NO SENSOR, then CHECKING, and
+  // LINK_TIMEOUT_MS the sketch shows WRONG MODE, then CHECKING, and
   // setRunApp runs again. Do not replace a fault we already recorded.
   if (_speedMode != _ranging) {
     _unverified = true;
@@ -886,6 +890,7 @@ inline bool C4001Sensor::read(TargetFix &fix) {
     }
     return false;
   }
+#endif
   fix.valid = true;
   _modeMismatch = false;
   _lastFrameMs = millis();

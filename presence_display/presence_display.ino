@@ -76,12 +76,17 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #define BACKLIGHT_DIM 90
 #define LOW_BATTERY_MV 6600
 #define LOW_BATTERY_CLEAR_MV 6900
+// Nominal bandgap scale: 1.1 V * 1024 * 1000. One-off meter trim:
+// set this to 1126400 * Vtrue / Vshown (integer values).
+#ifndef BATTERY_CAL_SCALE
+#define BATTERY_CAL_SCALE 1126400UL
+#endif
 
 // ATmegaBOOT (Nano "ATmega328P (Old Bootloader)") does not clear a
-// watchdog reset and can bootloop. That menu sets no unique -D, so set
-// this to 1 when you use it. The watchdog then stays off. Power-cycle
-// the board to recover a loop. Prefer the normal Uno or the new Nano
-// bootloader.
+// watchdog reset and can bootloop. That menu sets no compiler flag.
+// You must set this to 1 by hand when you use that menu. The watchdog
+// then stays off. Power-cycle the board to recover a loop. Prefer a
+// Uno or a Nano with the new bootloader.
 #ifndef NANO_OLD_BOOTLOADER
 #define NANO_OLD_BOOTLOADER 0
 #endif
@@ -114,6 +119,12 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #define RADAR_LINK RADAR_LINK_SOFT
 #endif
 
+// 1 = module TX only. The sketch does not send commands or save settings.
+// Leave 0 unless the command wire (D7, or the Mega TX pin) is open.
+#ifndef RADAR_RX_ONLY
+#define RADAR_RX_ONLY 0
+#endif
+
 #define RADAR_RX_PIN 6
 #define RADAR_TX_PIN 7
 #define C4001_BAUD 9600
@@ -124,6 +135,11 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #define SD_CS_PIN 4
 #define UNUSED_TOUCH_CS 8
 #define BACKLIGHT_PIN 3
+// 1651 v2 capacitive shield: the backlight is D5, the same pin as the
+// mode button. Leave FEATURE_MODE_BUTTON at 0 on that shield.
+#if FEATURE_MODE_BUTTON
+#warning "MODE_BUTTON_PIN is D5. The 1651 v2 capacitive shield uses D5 for the backlight."
+#endif
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
@@ -139,16 +155,20 @@ static const uint32_t kWdtCookie = 0xC4001A5AUL;
 volatile uint32_t gWdtCookie __attribute__((section(".noinit")));
 
 // Falls through into the next .init section (no prologue, no ret). `used`
-// keeps LTO and --gc-sections from dropping it. Disarms a watchdog that
-// a previous sketch left running. Does not read MCUSR.
+// keeps LTO and --gc-sections from dropping it. Clears MCUSR (r1 is 0),
+// then disarms a watchdog a previous sketch left running. WDRF must be
+// clear or the disable is ignored. The WDT RESET banner uses the .noinit
+// cookie, not the value that was in MCUSR.
 __attribute__((naked, used, section(".init3"))) void wdtEarly(void) {
   __asm__ __volatile__(
       "cli\n\t"
       "wdr\n\t"
-      "sts %0, %1\n\t"
-      "sts %0, __zero_reg__\n\t"
+      "out %0, __zero_reg__\n\t"
+      "sts %1, %2\n\t"
+      "sts %1, __zero_reg__\n\t"
       :
-      : "M"(_SFR_MEM_ADDR(WDTCSR)), "r"((uint8_t)(_BV(WDCE) | _BV(WDE))));
+      : "I"(_SFR_IO_ADDR(MCUSR)), "M"(_SFR_MEM_ADDR(WDTCSR)),
+        "r"((uint8_t)(_BV(WDCE) | _BV(WDE))));
 }
 
 #if ENABLE_WATCHDOG
@@ -251,9 +271,15 @@ static void showCmdRx() {
   uiStartup(tft, BANNER_CMDRX, F("Check D7"), F("commands, frames ok"));
 #elif RADAR_LINK == RADAR_LINK_SERIAL1
   uiStartup(tft, BANNER_CMDRX, F("Check pin 18"), F("commands, frames ok"));
+#elif RADAR_LINK == RADAR_LINK_SERIAL2
+  uiStartup(tft, BANNER_CMDRX, F("Check pin 16"), F("commands, frames ok"));
 #else
-  uiStartup(tft, BANNER_CMDRX, F("Check TX wire"), F("commands, frames ok"));
+  uiStartup(tft, BANNER_CMDRX, F("Check pin 14"), F("commands, frames ok"));
 #endif
+}
+
+static void showWrongMode() {
+  uiStartup(tft, BANNER_MODE, F("Module mode"), F("not the wires"));
 }
 
 #if FEATURE_BATTERY
@@ -269,16 +295,18 @@ static uint16_t readVccMv() {
   while (ADCSRA & _BV(ADSC)) {
   }
   (void)ADC;
-  delay(2);
-  ADCSRA |= _BV(ADSC);
-  while (ADCSRA & _BV(ADSC)) {
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    ADCSRA |= _BV(ADSC);
+    while (ADCSRA & _BV(ADSC)) {
+    }
+    sum += ADC;
   }
-  const uint16_t raw = ADC;
+  const uint16_t raw = (uint16_t)(sum / 4UL);
   if (raw == 0) {
     return 5000;
   }
-  // Nominal 1.1 V bandgap, scaled with 1024 counts: 1.1 * 1024 * 1000.
-  return (uint16_t)(1126400UL / raw);
+  return (uint16_t)(BATTERY_CAL_SCALE / raw);
 }
 
 static uint32_t gLastBatMs = 0;
@@ -294,20 +322,29 @@ static void sampleBattery(Adafruit_ILI9341 &panel, uint32_t now, bool force) {
     sum += analogRead(BATTERY_PIN);
     wdt_reset();
   }
-  const uint32_t vcc = readVccMv();
   const uint16_t adc = (uint16_t)(sum / 8UL);
-  const uint16_t sample =
-      (uint16_t)(((uint32_t)adc * vcc * 147UL) / (1024UL * 47UL));
   static uint16_t filt = 0;
   static bool seeded = false;
+  static uint16_t shownMv = 0;
+  static bool low = false;
+  // USB power and no pack: the divider sits at ground. Do not show 0.0 V LOW.
+  if (adc < 8) {
+    filt = 0;
+    seeded = false;
+    shownMv = 0;
+    low = false;
+    uiBattery(panel, 0, 0, false, true);
+    return;
+  }
+  const uint32_t vcc = readVccMv();
+  const uint16_t sample =
+      (uint16_t)(((uint32_t)adc * vcc * 147UL) / (1024UL * 47UL));
   if (!seeded) {
     filt = sample;
     seeded = true;
   } else {
     filt = (uint16_t)(((uint32_t)filt * 7UL + sample) / 8UL);
   }
-  static uint16_t shownMv = 0;
-  static bool low = false;
   if (shownMv == 0 || (uint16_t)abs((int)filt - (int)shownMv) >= 50) {
     shownMv = filt;
   }
@@ -322,7 +359,7 @@ static void sampleBattery(Adafruit_ILI9341 &panel, uint32_t now, bool force) {
   } else if (shownMv > 6000) {
     pct = (int)(((uint32_t)shownMv - 6000UL) * 100UL / 2400UL);
   }
-  uiBattery(panel, shownMv, pct, low);
+  uiBattery(panel, shownMv, pct, low, false);
 }
 #endif
 
@@ -349,7 +386,8 @@ static void holdWithWdt(uint16_t ms) {
 
 static void tryBringUp() {
   if (sBanner != BANNER_NOSENSOR && sBanner != BANNER_NORX &&
-      sBanner != BANNER_CMDRX && sBanner != BANNER_CFGFAIL) {
+      sBanner != BANNER_CMDRX && sBanner != BANNER_CFGFAIL &&
+      sBanner != BANNER_MODE) {
     showSearch();
   }
   // A stale timestamp must not count as a live sensor.
@@ -359,10 +397,13 @@ static void tryBringUp() {
     gReady = false;
     return;
   }
+#if RADAR_RX_ONLY
+  gConfigTried = true;
+#else
   if (!gConfigTried) {
     gConfigTried = true;
     if (sBanner != BANNER_NORX && sBanner != BANNER_CMDRX &&
-        sBanner != BANNER_CFGFAIL) {
+        sBanner != BANNER_CFGFAIL && sBanner != BANNER_MODE) {
       uiStartup(tft, BANNER_CONFIG, F("Checking"), F("radar settings"));
     }
     wdt_reset();
@@ -381,8 +422,12 @@ static void tryBringUp() {
       gReady = false;
       return;
     }
-    if (radar.configUnverified() && radar.configError() != 0 &&
-        !radar.rxTimedOut()) {
+    if (radar.modeMismatch()) {
+      showWrongMode();
+      logIfRoom(F("WRONG MODE"));
+      holdWithWdt(1200);
+    } else if (radar.configUnverified() && radar.configError() != 0 &&
+               !radar.rxTimedOut()) {
       showCfgFail();
       logIfRoom(radar.configError() ? radar.configError() : F("config failed"));
       holdWithWdt(1200);
@@ -395,6 +440,7 @@ static void tryBringUp() {
       return;
     }
   }
+#endif
   smoother.reset();
   gReady = true;
   gLastPresent = false;
@@ -403,12 +449,12 @@ static void tryBringUp() {
 #if FEATURE_BATTERY
   sampleBattery(tft, millis(), true);
 #endif
-  if (radar.configUnverified()) {
-    uiWarn(tft, radar.configError() ? radar.configError() : F("CFG UNVERIFIED"));
-    logIfRoom(radar.configError() ? radar.configError() : F("config unverified"));
-  } else if (radar.modeMismatch()) {
+  if (radar.modeMismatch()) {
     uiWarn(tft, F("WRONG MODE"));
     logIfRoom(F("WRONG MODE"));
+  } else if (radar.configUnverified()) {
+    uiWarn(tft, radar.configError() ? radar.configError() : F("CFG UNVERIFIED"));
+    logIfRoom(radar.configError() ? radar.configError() : F("config unverified"));
   } else {
     logIfRoom(F("radar ready"));
   }
@@ -543,13 +589,20 @@ static void serviceExtras(const TargetFix &raw, const TargetFix &shown,
 #endif
 #if FEATURE_BACKLIGHT_PWM
   static uint32_t lastTargetMs = 0;
-  if (gReady && haveFix && shown.present) {
+  static uint8_t lastLevel = 255;
+  if (!gReady) {
+    lastTargetMs = now;
+  } else if (haveFix && shown.present) {
     lastTargetMs = now;
   }
   const bool dimOk =
       gReady && lastTargetMs != 0 &&
       (uint32_t)(now - lastTargetMs) > BACKLIGHT_IDLE_MS;
-  analogWrite(BACKLIGHT_PIN, dimOk ? BACKLIGHT_DIM : 255);
+  const uint8_t level = dimOk ? (uint8_t)BACKLIGHT_DIM : 255;
+  if (level != lastLevel) {
+    lastLevel = level;
+    analogWrite(BACKLIGHT_PIN, level);
+  }
 #endif
 #if FEATURE_STATUS_LED
   const bool fault = !gReady || radar.configUnverified();
@@ -578,12 +631,18 @@ void loop() {
   }
   if (radar.lastFrameMs() == 0 ||
       (uint32_t)(now - radar.lastFrameMs()) > LINK_TIMEOUT_MS) {
+    const bool wrongMode = radar.modeMismatch();
     radar.invalidate();
     gConfigTried = false;
     gReady = false;
     smoother.reset();
-    showNoSensor();
-    logIfRoom(F("radar link lost"));
+    if (wrongMode) {
+      showWrongMode();
+      logIfRoom(F("WRONG MODE"));
+    } else {
+      showNoSensor();
+      logIfRoom(F("radar link lost"));
+    }
     gNextTryMs = millis() + 1200;
     return;
   }

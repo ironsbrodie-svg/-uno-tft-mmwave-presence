@@ -15,6 +15,8 @@
 #define BACKLIGHT_PIN 3
 #define RADAR_RX_PIN 6
 #define RADAR_TX_PIN 7
+#define LINK_TIMEOUT_MS 5000
+#define LISTEN_MS 12000
 
 extern "C" uint8_t __bss_end;
 
@@ -78,7 +80,7 @@ static void pushSlide(char *slide, uint8_t *n, uint8_t cap, char c) {
   slide[*n] = 0;
 }
 
-static bool seeReply(uint16_t timeoutMs) {
+static bool seeReply(uint16_t timeoutMs, bool rangeQuery) {
   char tail[16];
   uint8_t n = 0;
   tail[0] = 0;
@@ -87,14 +89,23 @@ static bool seeReply(uint16_t timeoutMs) {
     while (radarPort.available() > 0) {
       const char c = (char)radarPort.read();
       pushSlide(tail, &n, sizeof(tail), c);
-      if (strstr(tail, "Done") != 0 || strstr(tail, "Error") != 0 ||
-          strstr(tail, "Response") != 0) {
+      if (rangeQuery) {
+        if (strstr(tail, "Done") != 0 || strstr(tail, "Response") != 0) {
+          return true;
+        }
+      } else if (strstr(tail, "Done") != 0 || strstr(tail, "Error") != 0) {
         return true;
       }
     }
     delay(2);
   }
   return false;
+}
+
+static void drainPort() {
+  while (radarPort.available() > 0) {
+    radarPort.read();
+  }
 }
 
 void setup() {
@@ -132,7 +143,7 @@ void setup() {
   uint8_t printed = 0;
   uint32_t lastStar = 0;
   const uint32_t t0 = millis();
-  while ((uint32_t)(millis() - t0) < 4000UL) {
+  while ((uint32_t)(millis() - t0) < (uint32_t)LISTEN_MS) {
     while (radarPort.available() > 0) {
       const char c = (char)radarPort.read();
       pushSlide(slide, &sn, sizeof(slide), c);
@@ -188,7 +199,7 @@ void setup() {
   }
   line(102, modeOk, modeName);
 
-  const bool gapOk = gGapN > 0;
+  const bool gapOk = gGapN > 0 && gGapMax < LINK_TIMEOUT_MS;
   line(124, gapOk, F("GAP"));
   tft.setTextSize(1);
   tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
@@ -214,19 +225,35 @@ void setup() {
     Serial.println(gGapSum / gGapN);
   }
 
-  while (radarPort.available() > 0) {
-    radarPort.read();
+  drainPort();
+  radarPort.print(F("sensorStop"));
+  bool stopped = seeReply(2000, false);
+  if (!stopped) {
+    radarPort.print(F("sensorStop\r\n"));
+    stopped = seeReply(2000, false);
   }
-  radarPort.print(F("getRange"));
-  bool d7Ok = seeReply(800);
-  if (!d7Ok) {
-    radarPort.print(F("getRange\r\n"));
-    d7Ok = seeReply(800);
+  bool ranged = false;
+  if (stopped) {
+    drainPort();
+    radarPort.print(F("getRange"));
+    ranged = seeReply(800, true);
+    if (!ranged) {
+      radarPort.print(F("getRange\r\n"));
+      ranged = seeReply(800, true);
+    }
   }
+  radarPort.print(F("sensorStart"));
+  if (!seeReply(1000, false)) {
+    radarPort.print(F("sensorStart\r\n"));
+    seeReply(1000, false);
+  }
+  const bool d7Ok = stopped && ranged;
   line(160, d7Ok, F("D7"));
 
   const uint16_t margin = stackMargin();
-  const bool stackOk = margin >= 64;
+  // 256 bytes covers the main sketch's parsed line, command buffer, and
+  // the call chain. A 64-byte floor passed even when the stack was nearly full.
+  const bool stackOk = margin >= 256;
   line(182, stackOk, F("STACK"));
   tft.setTextSize(1);
   tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
