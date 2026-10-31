@@ -51,10 +51,10 @@ static void uiCenterFlash(Adafruit_ILI9341 &tft, const __FlashStringHelper *text
 }
 
 static void uiCenterRam(Adafruit_ILI9341 &tft, const char *text, int16_t y,
-                        uint8_t size, uint16_t color) {
+                        uint8_t size, uint16_t color, uint16_t bg) {
   tft.setTextSize(size);
   tft.setTextWrap(false);
-  tft.setTextColor(color);
+  tft.setTextColor(color, bg);
   int16_t x = (int16_t)((kScreenW - uiTextWidth(strlen(text), size)) / 2);
   if (x < 0) {
     x = 0;
@@ -126,12 +126,17 @@ static void uiBegin(Adafruit_ILI9341 &tft) {
   uiDrawBanner(tft, BANNER_START);
 }
 
+static const __FlashStringHelper *sLineA = 0;
+static const __FlashStringHelper *sLineB = 0;
+
 static void uiStartup(Adafruit_ILI9341 &tft, uint8_t kind,
                       const __FlashStringHelper *lineA,
                       const __FlashStringHelper *lineB) {
-  if (sBanner == kind) {
+  if (sBanner == kind && sLineA == lineA && sLineB == lineB) {
     return;
   }
+  sLineA = lineA;
+  sLineB = lineB;
   uiDrawBanner(tft, kind);
   tft.fillRect(0, kDistY, kScreenW, 320 - kDistY, ILI9341_BLACK);
   const size_t charsA = strlen_P(reinterpret_cast<const char *>(lineA));
@@ -145,13 +150,14 @@ static void uiDrawLabels(Adafruit_ILI9341 &tft) {
   tft.setTextSize(2);
   tft.setTextColor(label);
   tft.setCursor(4, kSpeedY + 8);
-  tft.print(F("SPEED"));
+  tft.print(F("SPEED m/s"));
   tft.setCursor(4, kEnergyY + 8);
   tft.print(F("ENERGY"));
 }
 
 static bool sLive = false;
 static bool sConeForce = true;
+static bool sWarned = false;
 static char sDist[8] = "";
 static char sSpeed[8] = "";
 static char sEnergy[8] = "";
@@ -163,6 +169,7 @@ static void uiArmRunning(Adafruit_ILI9341 &tft) {
   sSpeed[0] = 0;
   sEnergy[0] = 0;
   sConeForce = true;
+  sWarned = false;
   tft.fillRect(0, kDistY, kScreenW, 320 - kDistY, ILI9341_BLACK);
   uiDrawLabels(tft);
 }
@@ -177,7 +184,7 @@ static void uiPrintTail(Adafruit_ILI9341 &tft, int16_t y, const char *text,
   previous[previousLen - 1] = 0;
   tft.setTextSize(size);
   tft.setTextColor(color, ILI9341_BLACK);
-  tft.setCursor(78, y + 4);
+  tft.setCursor(116, y + 4);
   tft.print(text);
   const int16_t x = tft.getCursorX();
   if (x < kScreenW) {
@@ -197,7 +204,7 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
     const uint16_t tenths = (uint16_t)(fix.distanceCm / 10);
     itoa(tenths / 10, dist, 10);
     const uint8_t n = (uint8_t)strlen(dist);
-    if (n + 3 < sizeof(dist)) {
+    if ((int)n + 3 < (int)sizeof(dist)) {
       dist[n] = '.';
       dist[n + 1] = (char)('0' + (tenths % 10));
       dist[n + 2] = 'm';
@@ -211,11 +218,13 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
     dist[sizeof(dist) - 1] = 0;
   }
   if (strcmp(dist, sDist) != 0) {
+    if (strlen(dist) != strlen(sDist)) {
+      tft.fillRect(0, kDistY, kScreenW, kDistH, ILI9341_BLACK);
+    }
     strncpy(sDist, dist, sizeof(sDist) - 1);
     sDist[sizeof(sDist) - 1] = 0;
-    tft.fillRect(0, kDistY, kScreenW, kDistH, ILI9341_BLACK);
     uiCenterRam(tft, dist, kDistY + 6, 5,
-                fix.present ? ILI9341_YELLOW : ILI9341_WHITE);
+                fix.present ? ILI9341_YELLOW : ILI9341_WHITE, ILI9341_BLACK);
   }
 
   char speed[8];
@@ -228,7 +237,7 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
     }
     itoa(v / 10, p, 10);
     uint8_t n = (uint8_t)strlen(speed);
-    if (n + 2 < sizeof(speed)) {
+    if ((int)n + 2 < (int)sizeof(speed)) {
       speed[n] = '.';
       speed[n + 1] = (char)('0' + (v % 10));
       speed[n + 2] = 0;
@@ -241,7 +250,7 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
 
   char energy[8];
   if (fix.present && fix.hasEnergy) {
-    itoa(fix.energy, energy, 10);
+    utoa(fix.energy, energy, 10);
   } else {
     strncpy(energy, "--", sizeof(energy) - 1);
     energy[sizeof(energy) - 1] = 0;
@@ -256,4 +265,16 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
   coneDraw(tft, frame, fix, caps.maxRangeCm, caps.beamDeg, sConeForce);
   sConeForce = false;
   (void)caps.providesRange;
+}
+
+static void uiWarn(Adafruit_ILI9341 &tft, const __FlashStringHelper *msg) {
+  if (sWarned) {
+    return;
+  }
+  sWarned = true;
+  tft.fillRect(0, 296, kScreenW, 24, ILI9341_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+  tft.setCursor(4, 300);
+  tft.print(msg);
 }

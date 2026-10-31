@@ -69,15 +69,33 @@ void setup() {
   tft.setTextColor(ILI9341_WHITE);
   tft.setCursor(12, 168);
   tft.print(F("ID "));
+  if (idHi < 16) {
+    tft.print('0');
+  }
   tft.print(idHi, HEX);
+  if (idLo < 16) {
+    tft.print('0');
+  }
   tft.print(idLo, HEX);
+  tft.setTextSize(1);
+  tft.setCursor(12, 232);
+  tft.print(F("FAIL can mean MISO is open"));
 
   if (Serial.availableForWrite() > 24) {
     Serial.print(F("tft "));
     Serial.print(pass ? F("PASS") : F("FAIL"));
     Serial.print(F(" id=0x"));
+    if (idHi < 16) {
+      Serial.print('0');
+    }
     Serial.print(idHi, HEX);
+    if (idLo < 16) {
+      Serial.print('0');
+    }
     Serial.println(idLo, HEX);
+    if (!pass) {
+      Serial.println(F("FAIL can mean MISO is not wired"));
+    }
   }
 }
 

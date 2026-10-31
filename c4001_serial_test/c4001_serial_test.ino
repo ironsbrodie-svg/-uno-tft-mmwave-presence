@@ -3,21 +3,25 @@
 // Keep RADAR_LINK identical to presence_display.ino.
 // Uno: sensor TX -> D6, sensor RX -> D7. D4 stays HIGH (shield SD select).
 
+#ifndef RADAR_LINK_SOFT
 #define RADAR_LINK_SOFT 0
 #define RADAR_LINK_SERIAL1 1
 #define RADAR_LINK_SERIAL2 2
 #define RADAR_LINK_SERIAL3 3
+#endif
+#ifndef RADAR_LINK
 #define RADAR_LINK RADAR_LINK_SOFT
+#endif
 
 #define RADAR_RX_PIN 6
 #define RADAR_TX_PIN 7
 #define C4001_BAUD 9600
 #define SD_CS_PIN 4
-#define LINK_TIMEOUT_MS 2000
+#define LINK_TIMEOUT_MS 5000
 
-#if defined(ARDUINO_AVR_UNO) || defined(ESP8266)
+#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__) || defined(ESP8266)
 #if RADAR_LINK != RADAR_LINK_SOFT
-#error "This board (" ARDUINO_BOARD ") needs RADAR_LINK_SOFT."
+#error "No free hardware UART on " ARDUINO_BOARD ". Set RADAR_LINK_SOFT."
 #endif
 #include <SoftwareSerial.h>
 SoftwareSerial radarPort(RADAR_RX_PIN, RADAR_TX_PIN);
@@ -45,7 +49,7 @@ static bool gRxOk = false;
 static void drain() {
   while (RADAR_PORT.available() > 0) {
     const char c = (char)RADAR_PORT.read();
-    if (gLen + 1 >= sizeof(gBuf)) {
+    if ((int)gLen + 1 >= (int)sizeof(gBuf)) {
       memmove(gBuf, gBuf + 24, gLen - 24);
       gLen = (uint8_t)(gLen - 24);
     }
@@ -67,7 +71,7 @@ static bool waitAck(uint16_t timeoutMs) {
   while ((uint32_t)(millis() - startMs) < timeoutMs) {
     while (RADAR_PORT.available() > 0) {
       const char c = (char)RADAR_PORT.read();
-      if (n + 1 < sizeof(tail)) {
+      if ((int)n + 1 < (int)sizeof(tail)) {
         tail[n++] = c;
       } else {
         memmove(tail, tail + 1, sizeof(tail) - 2);
@@ -139,12 +143,17 @@ void loop() {
   static uint32_t lastBeat = 0;
   drain();
   const uint32_t now = millis();
+  static bool linkDown = false;
   if (gLastFrameMs != 0 && (uint32_t)(now - gLastFrameMs) > LINK_TIMEOUT_MS) {
-    if (Serial.availableForWrite() > 16) {
+    if (!linkDown && Serial.availableForWrite() > 16) {
       Serial.println(F("FAIL link"));
     }
+    linkDown = true;
     gTxOk = false;
     gLastFrameMs = now;
+  } else if (linkDown && gTxOk && gRxOk) {
+    linkDown = false;
+    printResult();
   }
   if ((uint32_t)(now - lastBeat) < 1000UL) {
     return;

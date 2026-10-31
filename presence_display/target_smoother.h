@@ -87,7 +87,9 @@ class TargetSmoother {
       if (coast) {
         _haveSpeed = false;
         _haveEnergy = false;
-      } else {
+      } else if (_latched || _score == 0) {
+        // A miss before latch only decrements the score. Wiping it here
+        // turned the leaky counter back into "one miss resets everything".
         clearLatch();
       }
     }
@@ -163,7 +165,8 @@ class TargetSmoother {
       _haveEnergy = true;
       return;
     }
-    _energy = (uint16_t)((_energy * (uint16_t)(_den - 1) + sample) / _den);
+    _energy = (uint16_t)(((uint32_t)_energy * (uint32_t)(_den - 1) + sample) /
+                         _den);
   }
 
   void clearLatch() {

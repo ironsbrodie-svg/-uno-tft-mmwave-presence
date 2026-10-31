@@ -33,6 +33,10 @@
 #define RANGE_MAX_CM MODEL_MAX_CM
 #endif
 
+static_assert(RANGE_MIN_CM >= 30, "RANGE_MIN_CM is below the sensor minimum");
+static_assert(RANGE_MAX_CM <= MODEL_MAX_CM, "RANGE_MAX_CM exceeds this model");
+static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX_CM");
+
 #define RADAR_MODE_RANGING 1
 #define RADAR_MODE_PRESENCE 0
 #define RADAR_MODE RADAR_MODE_RANGING
@@ -57,18 +61,25 @@
 #define DISTANCE_JUMP_CM 150
 
 // No complete frame for this long means the link is down, not an empty room.
-#define LINK_TIMEOUT_MS 2000
+// 5 s covers a 1 s presence-mode report with margin. The datasheet names
+// setUartOutput for the period, but the argument list was not in the text
+// we could verify, so the timeout is the knob instead of a guessed command.
+#define LINK_TIMEOUT_MS 5000
 
 // Directional drawing (future radar on a Mega). Leave 0 on the UNO.
 #ifndef CONE_DIRECTIONAL
 #define CONE_DIRECTIONAL 0
 #endif
 
+#ifndef RADAR_LINK_SOFT
 #define RADAR_LINK_SOFT 0
 #define RADAR_LINK_SERIAL1 1
 #define RADAR_LINK_SERIAL2 2
 #define RADAR_LINK_SERIAL3 3
+#endif
+#ifndef RADAR_LINK
 #define RADAR_LINK RADAR_LINK_SOFT
+#endif
 
 #define RADAR_RX_PIN 6
 #define RADAR_TX_PIN 7
@@ -105,6 +116,7 @@ TargetSmoother smoother(PRESENCE_HOLD_MS, PRESENCE_ENTER_READS,
                         DISTANCE_SMOOTH_DEN, DISTANCE_JUMP_CM);
 
 static bool gReady = false;
+static bool gConfigTried = false;
 static uint32_t gNextTryMs = 0;
 static uint32_t gLastPollMs = 0;
 static bool gLastPresent = false;
@@ -159,45 +171,44 @@ static void showNoRx() {
 #endif
 }
 
-static void showCfgFail() {
-  const __FlashStringHelper *why = radar.configError();
-  if (why == 0) {
-    why = F("config");
-  }
-  uiStartup(tft, BANNER_CFGFAIL, why, F("not saved"));
-}
-
 static void tryBringUp() {
   if (sBanner != BANNER_NOSENSOR && sBanner != BANNER_NORX &&
       sBanner != BANNER_CFGFAIL) {
     showSearch();
   }
-  if (!radar.probe()) {
+  if (radar.lastFrameMs() == 0 && !radar.probe()) {
     showNoSensor();
     logIfRoom(F("no radar frame"));
     gReady = false;
     return;
   }
-  if (sBanner != BANNER_CONFIG) {
-    uiStartup(tft, BANNER_CONFIG, F("Checking"), F("radar settings"));
-  }
-  if (!radar.configure()) {
-    if (radar.rxTimedOut()) {
-      showNoRx();
-      logIfRoom(F("sensor RX timeout"));
-    } else {
-      showCfgFail();
-      logIfRoom(radar.configError() ? radar.configError() : F("config failed"));
+  if (!gConfigTried) {
+    gConfigTried = true;
+    if (sBanner != BANNER_NORX && sBanner != BANNER_CFGFAIL) {
+      uiStartup(tft, BANNER_CONFIG, F("Checking"), F("radar settings"));
     }
-    gReady = false;
-    return;
+    const bool running = radar.configure();
+    if (!running) {
+      if (radar.rxTimedOut() && radar.lastFrameMs() == 0) {
+        showNoRx();
+        logIfRoom(F("sensor RX timeout"));
+        gReady = false;
+        return;
+      }
+      logIfRoom(F("config unverified"));
+    }
   }
   smoother.reset();
   gReady = true;
   gLastPresent = false;
   gLastDist = -1;
   uiArmRunning(tft);
-  logIfRoom(F("radar ready"));
+  if (radar.configUnverified()) {
+    uiWarn(tft, radar.rxTimedOut() ? F("NO RX, LIVE") : F("CFG UNVERIFIED"));
+    logIfRoom(radar.configError() ? radar.configError() : F("config unverified"));
+  } else {
+    logIfRoom(F("radar ready"));
+  }
 }
 
 static void logFix(const TargetFix &fix) {
@@ -223,7 +234,7 @@ static void logFix(const TargetFix &fix) {
   }
   if (fix.hasEnergy) {
     Serial.print(F(" e="));
-    Serial.print(fix.energy);
+    Serial.print((unsigned)fix.energy);
   }
   Serial.println();
 }

@@ -255,7 +255,7 @@ Aim the antenna away from your body, level or a little up. Pointed level from ch
 | `DISTANCE_SMOOTH_DEN` | 4 | Each new sample is 1/4 of the number on screen. |
 | `DISTANCE_JUMP_CM` | 150 | A single step larger than this waits for a second sample. |
 | `FRETTING_DETECTION` | 1 | Micro-motion on, so a still person can register when you are still. |
-| `LINK_TIMEOUT_MS` | 2000 | No complete frame for this long is a dead link, not an empty room. |
+| `LINK_TIMEOUT_MS` | 5000 | No complete frame for this long is a dead link, not an empty room. Long enough for a 1 s presence report. |
 
 `RADAR_MODE_RANGING` (default) has distance, speed, and energy. `RADAR_MODE_PRESENCE` reports someone in the beam, including someone standing still, and has no range. In that mode the extra knobs are `TRIG_SENSITIVITY`, `KEEP_SENSITIVITY` (0–9, higher is more sensitive), and the latency units above.
 
@@ -292,10 +292,10 @@ The on-screen arc is that distance across the whole 100° beam.
 
 | Buffer | Size | Why it is enough |
 | --- | --- | --- |
-| SoftwareSerial RX | 64 bytes, fixed in the library | At 9600 baud that is about 67 ms of data. The loop drains every 40 ms, about 38 bytes, so the ISR buffer is not left to overflow. A sketch `#define` does not resize it. |
+| SoftwareSerial RX | 64 bytes, fixed in the library | At 9600 baud that is about 67 ms of data. While the live screen is idle the loop polls about every 40 ms (about 38 bytes). A cone redraw or the CHECKING sequence blocks that poll, so the first frame after the block can be stale or dropped. A sketch `#define` does not resize this buffer. |
 | Frame assembly | 80 bytes | A ranging frame is under 50 bytes. 80 bytes holds one frame plus the start of the next, so the newest complete `$...*` can be kept. Longer junk is dropped, not parsed. |
 | One parsed line | 56 bytes, stack, only while parsing | Shorter than the assembly buffer on purpose. An over-long frame is discarded. |
-| Command reply | 80 bytes, stack, only during CHECKING | A flushed get/set reply (`Response ... Done`) fits. The front of the buffer is kept so `Response` is not slid away before `Done`. |
+| Command reply | The same 80-byte frame buffer, only during CHECKING | One reply at a time. The front of the buffer is kept so `Response` is not slid away before `Done`. |
 
 `TargetFix` on the UNO is integers (centimeters, cm/s, energy). The angle and x/y fields are compiled only with `CONE_DIRECTIONAL`.
 
@@ -315,6 +315,7 @@ The on-screen arc is that distance across the whole 100° beam.
 | Picture upside down | `TFT_ROTATION` 2. |
 | `NO SENSOR` / serial test `FAIL tx` | 5V, GND, module TX to D6, DIP switch on UART if there is one. |
 | `NO RX` / serial test `FAIL rx` | UNO D7 must reach module RX through the 1 kΩ (brown-black-red). The 2 kΩ or 2.2 kΩ (red-black-red or red-red-red) goes from module RX to GND. Swapping those resistors puts about 1.7 V on RX, which may not register as a high. Module TX still goes straight to D6. Frames on the screen or in the serial test mean that direction works. |
+| Yellow `CFG UNVERIFIED` under a live banner | Settings were not confirmed. The sketch keeps reading frames and does not stop/start the module again until you reset the board. |
 | `CFG FAIL` and a command name | That command did not return `Done`. Settings were not saved. Power-cycle the module and check the wiring. |
 | `FAIL link` or NO SENSOR after it was working | The TX wire or the module dropped. Plug it back; the sketch probes again. |
 | Banner flickers while you walk | Expected. Hold still. Lengthen `PRESENCE_HOLD_MS` or set `FRETTING_DETECTION` to 0. |
@@ -324,18 +325,38 @@ The on-screen arc is that distance across the whole 100° beam.
 | Upload fails | Close the Serial Monitor. The radar should not be on D0/D1. |
 | Backlight off | LITE/#3 was closed. This sketch drives D3 HIGH. |
 
+## Bench checklist
+
+These were not run on hardware. Confirm them on the real module before trusting a field install.
+
+| Check | What to look for |
+| --- | --- |
+| `setRunApp` reply | After a mode change, the monitor may show `Done` or nothing. The sketch treats either as accepted, then checks the next `$DFDMD` / `$DFHPD` frame. |
+| Mode persistence | Power-cycle only the sensor after CHECKING. If the next boot's frame prefix still matches, the mode survived `saveConfig`. If it resets, the sketch sends `setRunApp` again and does not call `saveConfig` for that alone. |
+| Frame cadence | Time the gap between `$` lines in `c4001_serial_test` in an empty room and with someone present. `LINK_TIMEOUT_MS` should stay above about 3× that gap. |
+| `ThrFactor` read-back | On the second boot, CHECKING should not be followed by a long flash write if the threshold already matches. A write every boot means the read-back format still disagrees. |
+| CRLF | If the first command times out and the retry works, later commands use CRLF. |
+| DIP switch | SEN0610: UART position. SEN0609: confirm whether your board even has the switch. |
+| Stack headroom | CHECKING uses one 80-byte reply buffer (the frame buffer) plus a 28-byte command. If the board resets only during CHECKING, say so. |
+| Boot time | Time from power to the first PRESENT or CLEAR. Checking still stops the module and reads settings back on every boot. |
+| Unplug recovery | Pull the yellow TX wire. Within `LINK_TIMEOUT_MS` the banner leaves CLEAR. Plug it back. Frames resume without another stop/start. `c4001_serial_test` should print `PASS tx+rx` again after `FAIL link`. |
+| D7 divider | With the 1 kΩ / 2.2 kΩ pair, module RX sits near 3.3–3.4 V when D7 is high, and TX still has no resistor. |
+
 ## Compile check
 
 arduino-cli, `arduino:avr` 1.8.8.
 
 | Sketch | Board | Flash | RAM globals |
 | --- | --- | --- | --- |
-| `presence_display` before this pass | Uno | 31706 bytes (98%) | 1109 bytes (54%) |
-| `presence_display` | Uno | 25124 bytes (77%) | 1066 bytes (52%) |
-| `tft_test` | Uno | 12942 bytes (40%) | 450 bytes (21%) |
-| `c4001_serial_test` | Uno | 4644 bytes (14%) | 408 bytes (19%) |
+| `presence_display` original | Uno | 31706 bytes (98%) | 1109 bytes (54%) |
+| `presence_display` | Uno | 25880 bytes (80%) | 1080 bytes (52%), 968 bytes left |
+| `presence_display` | Nano (328P) | 25880 bytes (84% of 30720) | 1080 bytes (52%) |
+| `tft_test` | Uno | 13140 bytes (40%) | 450 bytes (21%) |
+| `c4001_serial_test` | Uno | 4702 bytes (14%) | 409 bytes (19%) |
 | `bringup_test` | Uno | 14130 bytes (43%) | 559 bytes (27%) |
-| `presence_display`, `RADAR_LINK_SERIAL1` | Mega | 25018 bytes (9%) | 1106 bytes |
-| same, plus `CONE_DIRECTIONAL 1` | Mega | 26302 bytes (10%) | 1119 bytes |
+| `presence_display`, `RADAR_LINK_SERIAL1` | Mega | 25758 bytes (10%) | 1120 bytes |
+| same, plus `CONE_DIRECTIONAL 1` | Mega | 26976 bytes (10%) | 1133 bytes |
+
+CHECKING keeps the command reply in the existing 80-byte frame buffer (BSS), plus one 28-byte command on the stack. That replaces the earlier pile of ~80-byte reply objects (about 540 bytes of stack). A rough ceiling for `configure()` locals is under 200 bytes, not measured on a running board.
 
 The UNO image does not contain `dirSin256` / the directional overlay. The Mega image with `CONE_DIRECTIONAL 1` does. Adafruit BusIO still links the Wire library; that is the display stack, not the radar driver. Flash is at 77%, so that was left as-is.

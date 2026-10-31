@@ -21,6 +21,7 @@
 #endif
 
 #include <Arduino.h>
+#include <EEPROM.h>
 #include "presence_sensor.h"
 
 // UART driver for the C4001. DFRobot_C4001::sensorStop() loops forever and
@@ -30,15 +31,17 @@
 // newest complete frame in an 80-byte buffer (one frame is under 50 bytes,
 // so 80 still holds the next frame if two arrive before a poll).
 
-#if defined(ARDUINO_AVR_UNO) || defined(ESP8266)
+// Uno, Nano, Pro Mini, and other ATmega328P/168 boards have one UART,
+// and it is the USB port. Anything else here is expected to have Serial1.
+#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__) || defined(ESP8266)
 #if RADAR_LINK != RADAR_LINK_SOFT
-#error "This board has no free hardware UART (" ARDUINO_BOARD "). Set RADAR_LINK to RADAR_LINK_SOFT."
+#error "No free hardware UART on " ARDUINO_BOARD ". Set RADAR_LINK to RADAR_LINK_SOFT."
 #endif
 #include <SoftwareSerial.h>
 #define RADAR_PORT_IS_SOFT 1
 #else
 #if RADAR_LINK == RADAR_LINK_SOFT
-#error "Use a hardware UART on this board (" ARDUINO_BOARD "). Set RADAR_LINK to RADAR_LINK_SERIAL1."
+#error "Hardware UART required on " ARDUINO_BOARD ". Set RADAR_LINK to RADAR_LINK_SERIAL1."
 #endif
 #define RADAR_PORT_IS_SOFT 0
 #endif
@@ -64,6 +67,7 @@ class C4001Sensor : public PresenceSensor {
   uint32_t lastFrameMs() const override { return _lastFrameMs; }
   const __FlashStringHelper *configError() const override { return _fault; }
   bool rxTimedOut() const override { return _rxTimedOut; }
+  bool configUnverified() const { return _unverified; }
   const __FlashStringHelper *name() const override { return F("C4001"); }
   const __FlashStringHelper *modeName() const override {
     return _ranging ? F("ranging") : F("presence");
@@ -74,17 +78,16 @@ class C4001Sensor : public PresenceSensor {
   uint8_t horizontalBeamDeg() const override { return 100; }
 
  private:
-  struct Reply {
-    uint8_t kind;
-    char text[80];
-  };
-
+  // One scratch buffer (_buf) holds either a streamed frame or a command
+  // reply. configure() never keeps two replies live, so the old stack of
+  // ~80-byte Reply objects is gone.
   Stream &port();
   void drain();
   bool takeNewest(char *out, uint8_t outLen);
   bool parseFrame(char *line, TargetFix &fix);
-  Reply transact(const char *cmd, uint16_t timeoutMs);
-  bool stopModule();
+  uint8_t exchange(const char *cmd, uint16_t timeoutMs, bool crlf);
+  uint8_t transact(const char *cmd, uint16_t timeoutMs);
+  bool waitFrame(uint16_t timeoutMs);
   bool startModule();
   static int parseCm(const char *s, bool *ok);
   static int parseIntField(const char *s, bool *ok);
@@ -93,7 +96,6 @@ class C4001Sensor : public PresenceSensor {
   static bool replyInt(const char *text, uint8_t index, int *value);
   static void catCm(char *dst, uint8_t cap, uint16_t cm);
   static void catNum(char *dst, uint8_t cap, int value);
-  bool fail(const __FlashStringHelper *why);
 
   static const uint8_t kBufCap = 80;
   static const uint8_t kDone = 1;
@@ -114,6 +116,8 @@ class C4001Sensor : public PresenceSensor {
   bool _knowMode;
   bool _speedMode;
   bool _rxTimedOut;
+  bool _unverified;
+  bool _crlf;
   const __FlashStringHelper *_fault;
   uint32_t _lastFrameMs;
   char _buf[kBufCap];
@@ -129,7 +133,7 @@ static HardwareSerial &c4001Uart() {
 #elif RADAR_LINK == RADAR_LINK_SERIAL3
   return Serial3;
 #else
-#error "Set RADAR_LINK to SERIAL1, SERIAL2, or SERIAL3 on " ARDUINO_BOARD
+#error "RADAR_LINK is not SERIAL1, SERIAL2, or SERIAL3 (" ARDUINO_BOARD ")"
 #endif
 }
 #endif
@@ -160,6 +164,8 @@ inline C4001Sensor::C4001Sensor(uint16_t minCm, uint16_t maxCm,
       _knowMode(false),
       _speedMode(false),
       _rxTimedOut(false),
+      _unverified(false),
+      _crlf(false),
       _fault(0),
       _lastFrameMs(0),
       _len(0) {
@@ -292,8 +298,12 @@ inline int C4001Sensor::parseCm(const char *s, bool *ok) {
     }
     cm = whole * 100 + frac;
   }
+  if (cm > 32767L) {
+    cm = 32767L;
+  }
   *ok = true;
-  return neg ? (int)-cm : (int)cm;
+  const int clipped = neg ? (int)-cm : (int)cm;
+  return clipped;
 }
 
 inline unsigned long C4001Sensor::parseULong(const char *s, bool *ok) {
@@ -414,7 +424,13 @@ inline bool C4001Sensor::parseFrame(char *line, TargetFix &fix) {
         fix.distanceCm = (uint16_t)cm;
       }
       bool sok = false;
-      const int spd = parseCm(tok[4], &sok);
+      int spd = parseCm(tok[4], &sok);
+      if (spd > 1500) {
+        spd = 1500;
+      }
+      if (spd < -1500) {
+        spd = -1500;
+      }
       if (sok && spd > -1500 && spd < 1500) {
         fix.hasSpeed = true;
         fix.speedCms = (int16_t)spd;
@@ -480,16 +496,17 @@ inline bool C4001Sensor::probe() {
   return false;
 }
 
-inline C4001Sensor::Reply C4001Sensor::transact(const char *cmd,
-                                                uint16_t timeoutMs) {
-  Reply reply;
-  reply.kind = 0;
-  reply.text[0] = 0;
+inline uint8_t C4001Sensor::exchange(const char *cmd, uint16_t timeoutMs,
+                                      bool crlf) {
   while (port().available() > 0) {
     port().read();
   }
+  _len = 0;
+  _buf[0] = 0;
   port().print(cmd);
-  uint8_t n = 0;
+  if (crlf) {
+    port().print(F("\r\n"));
+  }
   char tail[8];
   uint8_t tn = 0;
   tail[0] = 0;
@@ -497,45 +514,66 @@ inline C4001Sensor::Reply C4001Sensor::transact(const char *cmd,
   while ((uint32_t)(millis() - startMs) < timeoutMs) {
     while (port().available() > 0) {
       const char c = (char)port().read();
-      if (n + 1 < sizeof(reply.text)) {
-        reply.text[n++] = c;
-        reply.text[n] = 0;
+      if ((uint8_t)(_len + 1) < kBufCap) {
+        _buf[_len++] = c;
+        _buf[_len] = 0;
       }
-      if (tn + 1 < sizeof(tail)) {
+      if ((uint8_t)(tn + 1) < sizeof(tail)) {
         tail[tn++] = c;
       } else {
         memmove(tail, tail + 1, sizeof(tail) - 2);
         tail[sizeof(tail) - 2] = c;
-        tn = sizeof(tail) - 1;
+        tn = (uint8_t)(sizeof(tail) - 1);
       }
       tail[tn] = 0;
-      if (strstr(tail, "Error") != 0 || strstr(reply.text, "Error") != 0) {
-        reply.kind = kError;
-        return reply;
+      if (strstr(tail, "Error") != 0 || strstr(_buf, "Error") != 0) {
+        delay(100);
+        return kError;
       }
-      if (strstr(tail, "Done") != 0 || strstr(reply.text, "Done") != 0) {
-        reply.kind = kDone;
-        return reply;
+      if (strstr(tail, "Done") != 0 || strstr(_buf, "Done") != 0) {
+        delay(100);
+        return kDone;
       }
     }
     delay(2);
   }
-  return reply;
+  delay(100);
+  return 0;
+}
+
+inline uint8_t C4001Sensor::transact(const char *cmd, uint16_t timeoutMs) {
+  uint8_t kind = exchange(cmd, timeoutMs, _crlf);
+  if (kind == 0) {
+    // One retry. If the bare command was silent, try CRLF (or the reverse).
+    const bool other = !_crlf;
+    kind = exchange(cmd, timeoutMs, other);
+    if (kind != 0) {
+      _crlf = other;
+    }
+  }
+  return kind;
+}
+
+inline bool C4001Sensor::waitFrame(uint16_t timeoutMs) {
+  const uint32_t startMs = millis();
+  while ((uint32_t)(millis() - startMs) < timeoutMs) {
+    drain();
+    char line[56];
+    TargetFix junk;
+    if (takeNewest(line, sizeof(line))) {
+      clearTarget(junk);
+      if (parseFrame(line, junk)) {
+        _lastFrameMs = millis();
+        return true;
+      }
+    }
+    delay(5);
+  }
+  return false;
 }
 
 inline bool C4001Sensor::startModule() {
-  return transact("sensorStart", 1000).kind == kDone;
-}
-
-inline bool C4001Sensor::fail(const __FlashStringHelper *why) {
-  _fault = why;
-  // Leave the module running on its previous config when a later step fails.
-  if (!_rxTimedOut) {
-    startModule();
-  }
-  _lastFrameMs = millis();
-  _len = 0;
-  return false;
+  return transact("sensorStart", 1000) == kDone;
 }
 
 inline void C4001Sensor::catNum(char *dst, uint8_t cap, int value) {
@@ -562,164 +600,205 @@ inline void C4001Sensor::catCm(char *dst, uint8_t cap, uint16_t cm) {
 inline bool C4001Sensor::configure() {
   _fault = 0;
   _rxTimedOut = false;
+  _unverified = false;
 
-  const Reply stopped = transact("sensorStop", 2000);
-  if (stopped.kind == 0) {
+  // Done: stopped now. Error: datasheet "already not running". Both are fine.
+  // Timeout is a missing RX answer, not proof the module is absent.
+  const uint8_t stopped = transact("sensorStop", 2000);
+  if (stopped == 0) {
     _rxTimedOut = true;
+    _unverified = true;
     _fault = F("NO SENSOR RX");
+    _lastFrameMs = millis();
     return false;
   }
 
   bool dirty = false;
   if (!_knowMode || _speedMode != _ranging) {
-    if (transact(_ranging ? "setRunApp 1" : "setRunApp 0", 800).kind != kDone) {
-      return fail(F("setRunApp"));
-    }
-    dirty = true;
-    _speedMode = _ranging;
-    _knowMode = true;
+    // Datasheet §2.6: response is None. ESPHome sometimes sees Done.
+    // Silence after a short wait is success. Mode is confirmed from the
+    // frame prefix after sensorStart. This is not a flash write: whether
+    // setRunApp survives saveConfig is not settled, so it must not force
+    // saveConfig on every boot.
+    exchange(_ranging ? "setRunApp 1" : "setRunApp 0", 400, _crlf);
+    delay(100);
   }
 
-  const Reply range = transact("getRange", 800);
+  const uint8_t rangeKind = transact("getRange", 800);
   int gotMin = 0;
   int gotMax = 0;
-  if (range.kind != kDone || !replyCm(range.text, 0, &gotMin) ||
-      !replyCm(range.text, 1, &gotMax)) {
-    return fail(F("getRange"));
+  const bool rangeOk = rangeKind == kDone && replyCm(_buf, 0, &gotMin) &&
+                       replyCm(_buf, 1, &gotMax);
+  if (!rangeOk) {
+    _unverified = true;
+    _fault = F("getRange");
   }
-  if (abs(gotMin - (int)_minCm) > 15 || abs(gotMax - (int)_maxCm) > 15) {
+  if (rangeOk && (abs(gotMin - (int)_minCm) > 15 ||
+                  abs(gotMax - (int)_maxCm) > 15)) {
     char cmd[28];
     strncpy(cmd, "setRange ", sizeof(cmd) - 1);
     cmd[sizeof(cmd) - 1] = 0;
     catCm(cmd, sizeof(cmd), _minCm);
     uint8_t n = (uint8_t)strlen(cmd);
-    if (n + 1 < sizeof(cmd)) {
+    if ((uint8_t)(n + 1) < sizeof(cmd)) {
       cmd[n++] = ' ';
       cmd[n] = 0;
     }
     catCm(cmd, sizeof(cmd), _maxCm);
-    if (transact(cmd, 800).kind != kDone) {
-      return fail(F("setRange"));
+    if (transact(cmd, 800) != kDone) {
+      _unverified = true;
+      _fault = F("setRange");
+    } else {
+      dirty = true;
     }
-    dirty = true;
   }
 
   if (_ranging) {
-    const Reply thr = transact("getThrFactor", 800);
+    const uint8_t thrKind = transact("getThrFactor", 800);
     int gotThr = -1;
-    if (thr.kind != kDone || !replyInt(thr.text, 0, &gotThr)) {
-      return fail(F("getThrFactor"));
-    }
-    if (gotThr != (int)_threshold) {
+    const bool thrOk = thrKind == kDone && replyInt(_buf, 0, &gotThr);
+    // Match the integer we send, or 10x that integer, so a scaled read-back
+    // does not rewrite flash on every boot.
+    const bool thrMatch =
+        thrOk && (gotThr == (int)_threshold || gotThr == (int)_threshold * 10);
+    if (!thrOk) {
+      _unverified = true;
+      _fault = F("getThrFactor");
+    } else if (!thrMatch) {
       char cmd[20];
       strncpy(cmd, "setThrFactor ", sizeof(cmd) - 1);
       cmd[sizeof(cmd) - 1] = 0;
       catNum(cmd, sizeof(cmd), (int)_threshold);
-      if (transact(cmd, 800).kind != kDone) {
-        return fail(F("setThrFactor"));
+      if (transact(cmd, 800) != kDone) {
+        _unverified = true;
+        _fault = F("setThrFactor");
+      } else {
+        dirty = true;
       }
-      dirty = true;
     }
-    const Reply micro = transact("getMicroMotion", 800);
+    const uint8_t microKind = transact("getMicroMotion", 800);
     int gotMicro = -1;
-    if (micro.kind != kDone || !replyInt(micro.text, 0, &gotMicro)) {
-      return fail(F("getMicroMotion"));
-    }
     const int wantMicro = _fretting ? 1 : 0;
-    if (gotMicro != wantMicro) {
-      if (transact(wantMicro ? "setMicroMotion 1" : "setMicroMotion 0", 800)
-              .kind != kDone) {
-        return fail(F("setMicroMotion"));
+    if (microKind != kDone || !replyInt(_buf, 0, &gotMicro)) {
+      _unverified = true;
+      _fault = F("getMicroMotion");
+    } else if (gotMicro != wantMicro) {
+      if (transact(wantMicro ? "setMicroMotion 1" : "setMicroMotion 0", 800) !=
+          kDone) {
+        _unverified = true;
+        _fault = F("setMicroMotion");
+      } else {
+        dirty = true;
       }
-      dirty = true;
     }
   } else {
-    const Reply trig = transact("getTrigRange", 800);
-    int gotTrig = 0;
-    if (trig.kind != kDone || !replyCm(trig.text, 0, &gotTrig)) {
-      return fail(F("getTrigRange"));
+    // Datasheet: trigger distance cannot be greater than max - min.
+    uint16_t trigCm = 0;
+    if (_maxCm > _minCm) {
+      trigCm = (uint16_t)(_maxCm - _minCm);
     }
-    if (abs(gotTrig - (int)_maxCm) > 15) {
+    const uint8_t trigKind = transact("getTrigRange", 800);
+    int gotTrig = 0;
+    if (trigKind != kDone || !replyCm(_buf, 0, &gotTrig)) {
+      _unverified = true;
+      _fault = F("getTrigRange");
+    } else if (abs(gotTrig - (int)trigCm) > 15) {
       char cmd[24];
       strncpy(cmd, "setTrigRange ", sizeof(cmd) - 1);
       cmd[sizeof(cmd) - 1] = 0;
-      catCm(cmd, sizeof(cmd), _maxCm);
-      if (transact(cmd, 800).kind != kDone) {
-        return fail(F("setTrigRange"));
+      catCm(cmd, sizeof(cmd), trigCm);
+      if (transact(cmd, 800) != kDone) {
+        _unverified = true;
+        _fault = F("setTrigRange");
+      } else {
+        dirty = true;
       }
-      dirty = true;
     }
-    const Reply sens = transact("getSensitivity", 800);
+    const uint8_t sensKind = transact("getSensitivity", 800);
     int gotKeep = -1;
     int gotTrigS = -1;
-    if (sens.kind != kDone || !replyInt(sens.text, 0, &gotKeep) ||
-        !replyInt(sens.text, 1, &gotTrigS)) {
-      return fail(F("getSensitivity"));
+    if (sensKind != kDone || !replyInt(_buf, 0, &gotKeep) ||
+        !replyInt(_buf, 1, &gotTrigS)) {
+      _unverified = true;
+      _fault = F("getSensitivity");
+    } else if (gotKeep != (int)_keepSens || gotTrigS != (int)_trigSens) {
+      char cmd[24];
+      strncpy(cmd, "setSensitivity ", sizeof(cmd) - 1);
+      cmd[sizeof(cmd) - 1] = 0;
+      catNum(cmd, sizeof(cmd), (int)_keepSens);
+      uint8_t n = (uint8_t)strlen(cmd);
+      if ((uint8_t)(n + 1) < sizeof(cmd)) {
+        cmd[n++] = ' ';
+        cmd[n] = 0;
+      }
+      catNum(cmd, sizeof(cmd), (int)_trigSens);
+      if (transact(cmd, 800) != kDone) {
+        _unverified = true;
+        _fault = F("setSensitivity");
+      } else {
+        dirty = true;
+      }
     }
-    const Reply lat = transact("getLatency", 800);
+    const uint8_t latKind = transact("getLatency", 800);
     int gotTrigD = 0;
     int gotKeepD = 0;
-    if (lat.kind != kDone || !replyCm(lat.text, 0, &gotTrigD) ||
-        !replyCm(lat.text, 1, &gotKeepD)) {
-      return fail(F("getLatency"));
-    }
-    const int wantKeepCs = (int)_keepDelay * 50;
-    if (abs(gotTrigD - (int)_trigDelay) > 5 || abs(gotKeepD - wantKeepCs) > 50) {
+    const uint32_t wantKeepCs32 = (uint32_t)_keepDelay * 50UL;
+    const int wantKeepCs = wantKeepCs32 > 30000UL ? 30000 : (int)wantKeepCs32;
+    if (latKind != kDone || !replyCm(_buf, 0, &gotTrigD) ||
+        !replyCm(_buf, 1, &gotKeepD)) {
+      _unverified = true;
+      _fault = F("getLatency");
+    } else if (abs(gotTrigD - (int)_trigDelay) > 5 ||
+               abs(gotKeepD - wantKeepCs) > 50) {
       char cmd[28];
       strncpy(cmd, "setLatency ", sizeof(cmd) - 1);
       cmd[sizeof(cmd) - 1] = 0;
       catNum(cmd, sizeof(cmd), (int)(_trigDelay / 100));
       uint8_t n = (uint8_t)strlen(cmd);
-      if (n + 4 < sizeof(cmd)) {
+      if ((uint8_t)(n + 4) < sizeof(cmd)) {
         cmd[n++] = '.';
         cmd[n++] = (char)('0' + ((_trigDelay / 10) % 10));
         cmd[n++] = (char)('0' + (_trigDelay % 10));
         cmd[n++] = ' ';
         cmd[n] = 0;
       }
-      const int keepCs = wantKeepCs;
-      catNum(cmd, sizeof(cmd), keepCs / 100);
+      catNum(cmd, sizeof(cmd), wantKeepCs / 100);
       n = (uint8_t)strlen(cmd);
-      if (n + 2 < sizeof(cmd)) {
+      if ((uint8_t)(n + 2) < sizeof(cmd)) {
         cmd[n++] = '.';
-        cmd[n++] = (char)('0' + ((keepCs / 10) % 10));
+        cmd[n++] = (char)('0' + ((wantKeepCs / 10) % 10));
         cmd[n] = 0;
       }
-      if (transact(cmd, 800).kind != kDone) {
-        return fail(F("setLatency"));
+      if (transact(cmd, 800) != kDone) {
+        _unverified = true;
+        _fault = F("setLatency");
+      } else {
+        dirty = true;
       }
-      dirty = true;
-    }
-    if (gotKeep != (int)_keepSens || gotTrigS != (int)_trigSens) {
-      char cmd[24];
-      strncpy(cmd, "setSensitivity ", sizeof(cmd) - 1);
-      cmd[sizeof(cmd) - 1] = 0;
-      catNum(cmd, sizeof(cmd), (int)_keepSens);
-      uint8_t n = (uint8_t)strlen(cmd);
-      if (n + 1 < sizeof(cmd)) {
-        cmd[n++] = ' ';
-        cmd[n] = 0;
-      }
-      catNum(cmd, sizeof(cmd), (int)_trigSens);
-      if (transact(cmd, 800).kind != kDone) {
-        return fail(F("setSensitivity"));
-      }
-      dirty = true;
     }
   }
 
-  // Datasheet: settings do not take effect and do not survive a restart
-  // unless saveConfig is sent. Send it only after a real change, and only
-  // after every set command has already returned Done.
-  if (dirty) {
-    if (transact("saveConfig", 2000).kind != kDone) {
-      return fail(F("saveConfig"));
+  // A failed save must be retried next boot even if RAM read-back matches.
+  static const int kEePending = 1023;
+  const bool savePending = EEPROM.read(kEePending) == 0xA5;
+  if (dirty || savePending) {
+    EEPROM.update(kEePending, 0xA5);
+    if (transact("saveConfig", 2000) == kDone) {
+      EEPROM.update(kEePending, 0x00);
+    } else {
+      _unverified = true;
+      _fault = F("saveConfig");
     }
   }
-  if (!startModule()) {
-    return fail(F("sensorStart"));
-  }
+  startModule();
   _len = 0;
+  _knowMode = false;
+  if (!waitFrame(1500) || _speedMode != _ranging) {
+    _unverified = true;
+    if (_fault == 0) {
+      _fault = F("mode");
+    }
+  }
   _lastFrameMs = millis();
   return true;
 }

@@ -160,7 +160,23 @@ static void coneDraw(Adafruit_ILI9341 &tft, const ConeFrame &frame,
     if (sRadius > 1) {
       coneBand(tft, apexX, apexY, sRadius, half, ILI9341_BLACK);
     }
-    coneStatic(tft, apexX, apexY, half, ring, ray);
+    const int16_t rings[3] = {(int16_t)(kConeR / 3),
+                              (int16_t)((kConeR * 2) / 3), kConeR};
+    for (uint8_t i = 0; i < 3; i++) {
+      const int16_t rr = rings[i];
+      const bool nearOld = sRadius > 1 && abs(rr - sRadius) <= 4;
+      const bool nearNew = radius > 1 && abs(rr - radius) <= 4;
+      if (nearOld || nearNew) {
+        coneStroke(tft, apexX, apexY, rr, -half, half, ring);
+      }
+    }
+    int16_t x = 0;
+    int16_t y = 0;
+    conePolar(apexX, apexY, kConeR, -half, x, y);
+    tft.drawLine(apexX, apexY, x, y, ray);
+    conePolar(apexX, apexY, kConeR, half, x, y);
+    tft.drawLine(apexX, apexY, x, y, ray);
+    tft.fillCircle(apexX, apexY, 3, ILI9341_WHITE);
   }
 
   if (band) {
