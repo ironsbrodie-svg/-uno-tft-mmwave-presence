@@ -63,57 +63,56 @@ Match the silkscreen (`VIN` or `VCC`, `GND`, `TX`, `RX`, `OUT`). A factory Gravi
 | Order | Module pin | Wire | UNO pin |
 | --- | --- | --- | --- |
 | 1 | GND | Black | GND |
-| 2 | TX | Yellow | D6 (UNO listens) |
-| 3 | RX | Blue | D7 (UNO talks) |
+| 2 | TX | Yellow, straight through | D6 (UNO listens) |
+| 3 | RX | Blue, through the divider below | D7 (UNO talks) |
 | 4 | VIN / VCC | Red | 5V |
 | — | OUT | Leave open | Not used |
 
-TX and RX cross: the module's TX talks to the UNO's receive pin.
+TX and RX cross: the module's TX talks to the UNO's receive pin. That yellow wire goes **straight** from module TX to D6. The divider is only on the other direction.
+
+### Recommended divider on D7
+
+DFRobot's Uno examples wire D7 straight to the module RX pin, and the supply pin accepts 3.3 V or 5 V. No input-voltage table was found for that RX pin, so the recommended wiring drops the UNO's 5 V high to about 3.3–3.4 V. The sketch is the same either way. On a Mega, build the same divider on pin 18 instead of D7.
+
+| Resistor | Where it goes | Bands |
+| --- | --- | --- |
+| 1 kΩ | In series: D7 to the module RX pin | Brown, black, red |
+| 2 kΩ, or 2.2 kΩ, or two 1 kΩ in series | From the module RX pin to GND | 2 kΩ is red, black, red. 2.2 kΩ is red, red, red |
+
+With 5 V on D7, 1 kΩ in series and 2 kΩ to GND is about 3.3 V at the module pin. 2.2 kΩ to GND is about 3.4 V.
 
 ```
-          C4001                         UNO + TFT shield
+  UNO D7 ----[ 1k  brown-black-red ]----+---- module RX
+                                         |
+                                         +----[ 2.2k red-red-red ]---- GND
+                                              (or 2k red-black-red,
+                                               or two 1k in series)
 
-         VIN / VCC  ---- red --------  5V
-         GND        ---- black ------  GND
-         TX         ---- yellow ------ D6
-         RX         ---- blue -------- D7
-         OUT        (no wire)
+  module TX  -------------------------------- yellow, no resistor ---- UNO D6
+
+  module VIN  --------------------------- red ------------------------ 5V
+  module GND  --------------------------- black ---------------------- GND
 ```
-
-Power: the module is specified for a 3.3 V or 5 V supply. Use the UNO **5V** pin. The UNO 3.3 V pin is too small for the radar (about 90 mA) as well as the board.
-
-Logic level, stated carefully:
-
-- Confirmed: DFRobot's Uno examples connect the UART pins straight to 5 V GPIO, and the supply pin accepts 3.3 V or 5 V. Baud in those examples and in the product spec is 9600.
-- Not confirmed: whether the module RX pin is 5 V tolerant. No VIH / IO-voltage table was found for SEN0609 or SEN0610.
-- Cautious option, if you want a 3.3 V high into the module: 1 kΩ from UNO D7 to the module RX pin, and 2 kΩ from that RX pin to GND. That is about 3.3 V. Do not put that divider on the module TX wire. A 3.3 V output from the module into D6 is already a valid high for the UNO.
 
 ```mermaid
 flowchart LR
-  subgraph module [C4001]
-    VCC[VIN / VCC]
-    GND0[GND]
-    TX0[TX]
-    RX0[RX]
-  end
-  subgraph uno [UNO stacking pins]
-    P5V[5V]
-    PGND[GND]
-    D6[D6]
-    D7[D7]
-  end
-  VCC --- P5V
-  GND0 --- PGND
-  TX0 --- D6
-  RX0 --- D7
+  D7[UNO D7] --- R1["1k brown-black-red"]
+  R1 --- RX0[module RX]
+  RX0 --- R2["2.2k red-red-red to GND"]
+  TX0[module TX] --- D6[UNO D6 straight]
+  VCC[module VIN] --- P5V[UNO 5V]
+  GND0[module GND] --- PGND[UNO GND]
 ```
+
+Power: the module is specified for a 3.3 V or 5 V supply. Use the UNO **5V** pin. The UNO 3.3 V pin is too small for the radar (about 90 mA) as well as the board. Baud is 9600.
 
 ### 4. Check before power
 
 - Shield flush, ICSP plug seated.
 - Red wire on **5V** only. Not VIN, not 3.3V, not IOREF.
 - Black wire on GND.
-- Module TX to D6. Module RX to D7.
+- Module TX goes straight to D6, with no resistor in that wire.
+- The 1 kΩ (brown-black-red) is between D7 and module RX. The 2 kΩ or 2.2 kΩ goes from module RX to GND, not to 5V.
 - Nothing on D0, D1, D4, or D9–D13.
 - OUT has no wire.
 - DIP switch on UART if the board has one.
@@ -304,7 +303,7 @@ The on-screen arc is that distance across the whole 100° beam.
 
 1. Tools → Board → **Arduino Mega or Mega 2560**.
 2. Shield SPI on the Mega is D50 (MISO), D51 (MOSI), D52 (SCK). The ICSP header in the **middle** of the Mega is that SPI port. The ICSP header by the USB socket is the USB chip. A stock 1651 uses the middle ICSP plug. `TFT_CS` stays 10 and `TFT_DC` stays 9. A shield whose SPI jumpers were moved to D11–D13 will not see SPI on a Mega until those jumpers go back to ICSP. D4 is still the SD chip select and stays HIGH.
-3. In `presence_display.ino` change one line to `#define RADAR_LINK RADAR_LINK_SERIAL1`. Do the same in `c4001_serial_test.ino` if you use it. Sensor TX goes to pin 19, sensor RX to pin 18.
+3. In `presence_display.ino` change one line to `#define RADAR_LINK RADAR_LINK_SERIAL1`. Do the same in `c4001_serial_test.ino` if you use it. Sensor TX goes straight to pin 19. Sensor RX is fed from pin 18 through the same 1 kΩ / 2.2 kΩ divider described above.
 4. For the directional overlay, set `#define CONE_DIRECTIONAL 1` as well. Leave Serial2 free for a later LD2450.
 5. Building a Mega sketch while `RADAR_LINK` is still `RADAR_LINK_SOFT` stops with `#error` and the board name.
 
@@ -315,7 +314,7 @@ The on-screen arc is that distance across the whole 100° beam.
 | White TFT, or `tft_test` prints FAIL | Reseat the shield, including ICSP. PASS needs ID bytes 93 41. |
 | Picture upside down | `TFT_ROTATION` 2. |
 | `NO SENSOR` / serial test `FAIL tx` | 5V, GND, module TX to D6, DIP switch on UART if there is one. |
-| `NO RX` / serial test `FAIL rx` | UNO D7 to module RX. Frames prove the other direction works. |
+| `NO RX` / serial test `FAIL rx` | UNO D7 must reach module RX through the 1 kΩ (brown-black-red). The 2 kΩ or 2.2 kΩ (red-black-red or red-red-red) goes from module RX to GND. Swapping those resistors puts about 1.7 V on RX, which may not register as a high. Module TX still goes straight to D6. Frames on the screen or in the serial test mean that direction works. |
 | `CFG FAIL` and a command name | That command did not return `Done`. Settings were not saved. Power-cycle the module and check the wiring. |
 | `FAIL link` or NO SENSOR after it was working | The TX wire or the module dropped. Plug it back; the sketch probes again. |
 | Banner flickers while you walk | Expected. Hold still. Lengthen `PRESENCE_HOLD_MS` or set `FRETTING_DETECTION` to 0. |
