@@ -60,6 +60,22 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #define DISTANCE_SMOOTH_DEN 4
 #define DISTANCE_JUMP_CM 150
 
+// Display hysteresis. 0 shows every centimeter step.
+#define DISTANCE_DEADBAND_CM 7
+
+// Extra hardware. Default off so the Uno build stays small.
+#define FEATURE_BATTERY 0
+#define FEATURE_BACKLIGHT_PWM 0
+#define FEATURE_STATUS_LED 0
+#define FEATURE_SERIAL_LOG 0
+#define FEATURE_MODE_BUTTON 0
+#define BATTERY_PIN A1
+#define STATUS_LED_PIN A0
+#define MODE_BUTTON_PIN 5
+#define BACKLIGHT_IDLE_MS 20000
+#define BACKLIGHT_DIM 40
+#define LOW_BATTERY_MV 6600
+
 // No complete frame for this long means the link is down, not an empty room.
 // 5 s covers a 1 s presence-mode report with margin. The datasheet names
 // setUartOutput for the period, but the argument list was not in the text
@@ -98,6 +114,15 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #include "c4001_sensor.h"
 #include "target_smoother.h"
 #include "ui.h"
+#include <avr/wdt.h>
+
+uint8_t gMcusr __attribute__((section(".noinit")));
+void wdtEarly(void) __attribute__((section(".init3")));
+void wdtEarly(void) {
+  gMcusr = MCUSR;
+  MCUSR = 0;
+  wdt_disable();
+}
 
 #if RADAR_PORT_IS_SOFT
 C4001Sensor radar(RANGE_MIN_CM, RANGE_MAX_CM, RANGE_THRESHOLD,
@@ -161,6 +186,14 @@ static void showNoSensor() {
 #endif
 }
 
+static void showCfgFail() {
+  const __FlashStringHelper *why = radar.configError();
+  if (why == 0) {
+    why = F("config");
+  }
+  uiStartup(tft, BANNER_CFGFAIL, why, F("not saved"));
+}
+
 static void showNoRx() {
 #if RADAR_LINK == RADAR_LINK_SOFT
   uiStartup(tft, BANNER_NORX, F("Check D7"), F("UNO to sensor RX"));
@@ -176,7 +209,8 @@ static void tryBringUp() {
       sBanner != BANNER_CFGFAIL) {
     showSearch();
   }
-  if (radar.lastFrameMs() == 0 && !radar.probe()) {
+  // A stale timestamp must not count as a live sensor.
+  if (!radar.probe()) {
     showNoSensor();
     logIfRoom(F("no radar frame"));
     gReady = false;
@@ -187,15 +221,20 @@ static void tryBringUp() {
     if (sBanner != BANNER_NORX && sBanner != BANNER_CFGFAIL) {
       uiStartup(tft, BANNER_CONFIG, F("Checking"), F("radar settings"));
     }
+    wdt_reset();
     const bool running = radar.configure();
-    if (!running) {
-      if (radar.rxTimedOut() && radar.lastFrameMs() == 0) {
-        showNoRx();
-        logIfRoom(F("sensor RX timeout"));
-        gReady = false;
-        return;
-      }
-      logIfRoom(F("config unverified"));
+    wdt_reset();
+    if (!running && !radar.heardBytes()) {
+      showNoRx();
+      logIfRoom(F("sensor RX timeout"));
+      gConfigTried = false;
+      gReady = false;
+      return;
+    }
+    if (!running || (radar.configUnverified() && radar.configError() != 0 &&
+                     !radar.rxTimedOut())) {
+      showCfgFail();
+      logIfRoom(radar.configError() ? radar.configError() : F("config failed"));
     }
   }
   smoother.reset();
@@ -203,8 +242,11 @@ static void tryBringUp() {
   gLastPresent = false;
   gLastDist = -1;
   uiArmRunning(tft);
-  if (radar.configUnverified()) {
-    uiWarn(tft, radar.rxTimedOut() ? F("NO RX, LIVE") : F("CFG UNVERIFIED"));
+  if (gMcusr & _BV(WDRF)) {
+    uiWarn(tft, F("WDT RESET"));
+    logIfRoom(F("WDT RESET"));
+  } else if (radar.configUnverified()) {
+    uiWarn(tft, radar.configError() ? radar.configError() : F("CFG UNVERIFIED"));
     logIfRoom(radar.configError() ? radar.configError() : F("config unverified"));
   } else {
     logIfRoom(F("radar ready"));
@@ -242,18 +284,91 @@ static void logFix(const TargetFix &fix) {
 void setup() {
   Serial.begin(115200);
   holdShieldIdlePins();
+#if FEATURE_STATUS_LED
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, LOW);
+#endif
+#if FEATURE_BACKLIGHT_PWM
+  pinMode(BACKLIGHT_PIN, OUTPUT);
+  analogWrite(BACKLIGHT_PIN, 255);
+#endif
+#if FEATURE_MODE_BUTTON
+  pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
+#endif
   tft.begin();
   tft.setRotation(TFT_ROTATION);
+  wdt_enable(WDTO_8S);
   uiBegin(tft);
+  if (gMcusr & _BV(WDRF)) {
+    uiStartup(tft, BANNER_START, F("WDT RESET"), F("recovering"));
+  }
+#if FEATURE_MODE_BUTTON
+  if (digitalRead(MODE_BUTTON_PIN) == LOW) {
+    uiStartup(tft, BANNER_START, F("SELF TEST"), F("upload self_test"));
+  }
+#endif
   showSearch();
   radar.begin();
   tryBringUp();
   gNextTryMs = millis() + 1200;
 }
 
+static void serviceExtras(const TargetFix &shown, bool haveFix, uint32_t now) {
+#if FEATURE_SERIAL_LOG
+  if (haveFix && Serial.availableForWrite() > 24) {
+    Serial.print(F("csv,"));
+    Serial.print(shown.distanceCm);
+    Serial.print(',');
+    Serial.print(shown.speedCms);
+    Serial.print(',');
+    Serial.println((unsigned)shown.energy);
+  }
+#else
+  (void)shown;
+  (void)haveFix;
+#endif
+#if FEATURE_BATTERY
+  static uint32_t lastBatMs = 0;
+  static uint16_t batMv = 0;
+  if ((uint32_t)(now - lastBatMs) > 3000UL) {
+    lastBatMs = now;
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < 8; i++) {
+      sum += analogRead(BATTERY_PIN);
+    }
+    const uint16_t adc = (uint16_t)(sum / 8);
+    batMv = (uint16_t)((adc * 5000UL * 147UL) / (1023UL * 47UL));
+    const int pct = batMv <= 6000 ? 0 : (batMv >= 8400 ? 100 : (int)((batMv - 6000UL) * 100UL / 2400UL));
+    uiBattery(tft, batMv, pct, batMv <= LOW_BATTERY_MV);
+  }
+#endif
+#if FEATURE_BACKLIGHT_PWM
+  static uint32_t lastTargetMs = 0;
+  if (haveFix && shown.present) {
+    lastTargetMs = now;
+  }
+  const bool idle = lastTargetMs != 0 && (uint32_t)(now - lastTargetMs) > BACKLIGHT_IDLE_MS;
+  analogWrite(BACKLIGHT_PIN, idle ? BACKLIGHT_DIM : 255);
+#endif
+#if FEATURE_STATUS_LED
+  const bool fault = !gReady || radar.configUnverified();
+  if (fault) {
+    digitalWrite(STATUS_LED_PIN, ((now / 150UL) & 1UL) ? HIGH : LOW);
+  } else if (haveFix && shown.present) {
+    digitalWrite(STATUS_LED_PIN, HIGH);
+  } else {
+    digitalWrite(STATUS_LED_PIN, ((now / 500UL) & 1UL) ? HIGH : LOW);
+  }
+#endif
+  (void)now;
+}
+
 void loop() {
   const uint32_t now = millis();
+  wdt_reset();
+  uiHeartbeat(tft);
   if (!gReady) {
+    serviceExtras(TargetFix(), false, now);
     if ((int32_t)(now - gNextTryMs) < 0) {
       return;
     }
@@ -263,6 +378,8 @@ void loop() {
   }
   if (radar.lastFrameMs() == 0 ||
       (uint32_t)(now - radar.lastFrameMs()) > LINK_TIMEOUT_MS) {
+    radar.invalidate();
+    gConfigTried = false;
     gReady = false;
     smoother.reset();
     showNoSensor();
@@ -278,9 +395,11 @@ void loop() {
   TargetFix raw;
   TargetFix shown;
   if (!radar.read(raw)) {
+    serviceExtras(TargetFix(), false, now);
     return;
   }
   smoother.apply(raw, shown);
   uiRefresh(tft, shown, capsFor(radar));
   logFix(shown);
+  serviceExtras(shown, true, now);
 }

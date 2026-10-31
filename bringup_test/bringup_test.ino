@@ -25,7 +25,7 @@ static bool waitToken(const char *token, uint16_t timeoutMs) {
   while ((uint32_t)(millis() - startMs) < timeoutMs) {
     while (radarPort.available() > 0) {
       const char c = (char)radarPort.read();
-      if (n + 1 < sizeof(tail)) {
+      if ((int)n + 1 < (int)sizeof(tail)) {
         tail[n++] = c;
       } else {
         memmove(tail, tail + 1, sizeof(tail) - 2);

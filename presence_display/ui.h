@@ -200,8 +200,20 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
   uiDrawBanner(tft, fix.present ? BANNER_PRESENT : BANNER_CLEAR);
 
   char dist[8];
+  uint16_t shownCm = fix.distanceCm;
+  static uint16_t sDeadCm = 0;
+  static bool sDeadOn = false;
+  if (!(fix.present && fix.hasDistance)) {
+    sDeadOn = false;
+  } else if (!sDeadOn ||
+             (uint16_t)abs((int)shownCm - (int)sDeadCm) >= DISTANCE_DEADBAND_CM) {
+    sDeadCm = shownCm;
+    sDeadOn = true;
+  } else {
+    shownCm = sDeadCm;
+  }
   if (fix.present && fix.hasDistance) {
-    const uint16_t tenths = (uint16_t)(fix.distanceCm / 10);
+    const uint16_t tenths = (uint16_t)(shownCm / 10);
     itoa(tenths / 10, dist, 10);
     const uint8_t n = (uint8_t)strlen(dist);
     if ((int)n + 3 < (int)sizeof(dist)) {
@@ -266,6 +278,40 @@ static void uiRefresh(Adafruit_ILI9341 &tft, const TargetFix &fix,
   sConeForce = false;
   (void)caps.providesRange;
 }
+
+static void uiHeartbeat(Adafruit_ILI9341 &tft) {
+  static uint32_t lastMs = 0;
+  static bool on = false;
+  const uint32_t now = millis();
+  if ((uint32_t)(now - lastMs) < 250UL) {
+    return;
+  }
+  lastMs = now;
+  on = !on;
+  tft.fillRect(232, 308, 6, 6, on ? ILI9341_WHITE : ILI9341_BLACK);
+}
+
+#ifndef DISTANCE_DEADBAND_CM
+#define DISTANCE_DEADBAND_CM 7
+#endif
+
+#if FEATURE_BATTERY
+static void uiBattery(Adafruit_ILI9341 &tft, uint16_t mv, int pct, bool low) {
+  tft.fillRect(4, 286, 160, 12, ILI9341_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(low ? ILI9341_YELLOW : ILI9341_WHITE, ILI9341_BLACK);
+  tft.setCursor(4, 288);
+  tft.print(mv / 1000);
+  tft.print('.');
+  tft.print((mv % 1000) / 100);
+  tft.print(F("V "));
+  tft.print(pct);
+  tft.print('%');
+  if (low) {
+    tft.print(F(" LOW"));
+  }
+}
+#endif
 
 static void uiWarn(Adafruit_ILI9341 &tft, const __FlashStringHelper *msg) {
   if (sWarned) {

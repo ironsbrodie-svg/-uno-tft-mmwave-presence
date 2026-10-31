@@ -70,6 +70,14 @@ static void coneStroke(Adafruit_ILI9341 &tft, int16_t apexX, int16_t apexY,
     prevY = y;
     started = true;
   }
+  if (started && prevX != 0) {
+    int16_t endX = 0;
+    int16_t endY = 0;
+    conePolar(apexX, apexY, radius, toDeg, endX, endY);
+    if (endX != prevX || endY != prevY) {
+      tft.drawLine(prevX, prevY, endX, endY, color);
+    }
+  }
 }
 
 static void coneBand(Adafruit_ILI9341 &tft, int16_t apexX, int16_t apexY,

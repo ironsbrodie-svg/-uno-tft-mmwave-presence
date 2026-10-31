@@ -88,16 +88,29 @@ static bool waitAck(uint16_t timeoutMs) {
   return false;
 }
 
-static bool roundTripRx() {
+static bool sendAck(const __FlashStringHelper *cmd, uint16_t timeoutMs) {
   while (RADAR_PORT.available() > 0) {
     RADAR_PORT.read();
   }
-  RADAR_PORT.print(F("sensorStop"));
-  if (!waitAck(2000)) {
+  RADAR_PORT.print(cmd);
+  if (waitAck(timeoutMs)) {
+    return true;
+  }
+  RADAR_PORT.print(cmd);
+  RADAR_PORT.print(F("\r\n"));
+  return waitAck(timeoutMs);
+}
+
+static bool gStartOk = false;
+
+static bool roundTripRx() {
+  if (!sendAck(F("sensorStop"), 2000)) {
     return false;
   }
-  RADAR_PORT.print(F("sensorStart"));
-  waitAck(1000);
+  gStartOk = sendAck(F("sensorStart"), 1000);
+  if (!gStartOk && Serial.availableForWrite() > 12) {
+    Serial.println(F("FAIL sensorStart"));
+  }
   return true;
 }
 

@@ -22,6 +22,7 @@
 
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <avr/wdt.h>
 #include "presence_sensor.h"
 
 // UART driver for the C4001. DFRobot_C4001::sensorStop() loops forever and
@@ -68,6 +69,8 @@ class C4001Sensor : public PresenceSensor {
   const __FlashStringHelper *configError() const override { return _fault; }
   bool rxTimedOut() const override { return _rxTimedOut; }
   bool configUnverified() const { return _unverified; }
+  bool heardBytes() const { return _heardBytes; }
+  void invalidate();
   const __FlashStringHelper *name() const override { return F("C4001"); }
   const __FlashStringHelper *modeName() const override {
     return _ranging ? F("ranging") : F("presence");
@@ -118,6 +121,7 @@ class C4001Sensor : public PresenceSensor {
   bool _rxTimedOut;
   bool _unverified;
   bool _crlf;
+  bool _heardBytes;
   const __FlashStringHelper *_fault;
   uint32_t _lastFrameMs;
   char _buf[kBufCap];
@@ -133,7 +137,7 @@ static HardwareSerial &c4001Uart() {
 #elif RADAR_LINK == RADAR_LINK_SERIAL3
   return Serial3;
 #else
-#error "RADAR_LINK is not SERIAL1, SERIAL2, or SERIAL3 (" ARDUINO_BOARD ")"
+  return Serial1;
 #endif
 }
 #endif
@@ -166,6 +170,7 @@ inline C4001Sensor::C4001Sensor(uint16_t minCm, uint16_t maxCm,
       _rxTimedOut(false),
       _unverified(false),
       _crlf(false),
+      _heardBytes(false),
       _fault(0),
       _lastFrameMs(0),
       _len(0) {
@@ -187,6 +192,16 @@ inline bool C4001Sensor::begin() {
   c4001Uart().begin(C4001_BAUD);
 #endif
   return true;
+}
+
+inline void C4001Sensor::invalidate() {
+  _lastFrameMs = 0;
+  _knowMode = false;
+  _len = 0;
+  _buf[0] = 0;
+  while (port().available() > 0) {
+    port().read();
+  }
 }
 
 inline void C4001Sensor::drain() {
@@ -475,10 +490,14 @@ inline bool C4001Sensor::probe() {
       }
     }
     delay(5);
+    wdt_reset();
   }
   // No stream. A module left stopped is recovered with sensorStart only.
   // That command does not write the module's flash.
   port().print(F("sensorStart"));
+  if (_crlf) {
+    port().print(F("\r\n"));
+  }
   const uint32_t kick = millis();
   while ((uint32_t)(millis() - kick) < 1000UL) {
     drain();
@@ -514,6 +533,7 @@ inline uint8_t C4001Sensor::exchange(const char *cmd, uint16_t timeoutMs,
   while ((uint32_t)(millis() - startMs) < timeoutMs) {
     while (port().available() > 0) {
       const char c = (char)port().read();
+      _heardBytes = true;
       if ((uint8_t)(_len + 1) < kBufCap) {
         _buf[_len++] = c;
         _buf[_len] = 0;
@@ -536,8 +556,10 @@ inline uint8_t C4001Sensor::exchange(const char *cmd, uint16_t timeoutMs,
       }
     }
     delay(2);
+    wdt_reset();
   }
   delay(100);
+  wdt_reset();
   return 0;
 }
 
@@ -568,6 +590,7 @@ inline bool C4001Sensor::waitFrame(uint16_t timeoutMs) {
       }
     }
     delay(5);
+    wdt_reset();
   }
   return false;
 }
@@ -601,6 +624,7 @@ inline bool C4001Sensor::configure() {
   _fault = 0;
   _rxTimedOut = false;
   _unverified = false;
+  _heardBytes = false;
 
   // Done: stopped now. Error: datasheet "already not running". Both are fine.
   // Timeout is a missing RX answer, not proof the module is absent.
@@ -609,7 +633,6 @@ inline bool C4001Sensor::configure() {
     _rxTimedOut = true;
     _unverified = true;
     _fault = F("NO SENSOR RX");
-    _lastFrameMs = millis();
     return false;
   }
 
@@ -815,6 +838,14 @@ inline bool C4001Sensor::read(TargetFix &fix) {
     memcpy(line, newer, sizeof(line));
   }
   if (!parseFrame(line, fix)) {
+    return false;
+  }
+  // A frame from the other mode still proves the wire is up, but it is
+  // not a reading for the mode this sketch configured.
+  if (_speedMode != _ranging) {
+    _unverified = true;
+    _fault = F("mode");
+    _lastFrameMs = millis();
     return false;
   }
   fix.valid = true;

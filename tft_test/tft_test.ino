@@ -77,9 +77,11 @@ void setup() {
     tft.print('0');
   }
   tft.print(idLo, HEX);
-  tft.setTextSize(1);
-  tft.setCursor(12, 232);
-  tft.print(F("FAIL can mean MISO is open"));
+  if (!pass) {
+    tft.setTextSize(1);
+    tft.setCursor(12, 232);
+    tft.print(F("FAIL can mean MISO is open"));
+  }
 
   if (Serial.availableForWrite() > 24) {
     Serial.print(F("tft "));
