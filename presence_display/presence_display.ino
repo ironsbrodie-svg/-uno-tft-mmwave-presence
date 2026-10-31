@@ -73,8 +73,25 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #define STATUS_LED_PIN A0
 #define MODE_BUTTON_PIN 5
 #define BACKLIGHT_IDLE_MS 20000
-#define BACKLIGHT_DIM 40
+#define BACKLIGHT_DIM 90
 #define LOW_BATTERY_MV 6600
+#define LOW_BATTERY_CLEAR_MV 6900
+
+// ATmegaBOOT (Nano "ATmega328P (Old Bootloader)") does not clear a
+// watchdog reset and can bootloop. That menu sets no unique -D, so set
+// this to 1 when you use it. The watchdog then stays off. Power-cycle
+// the board to recover a loop. Prefer the normal Uno or the new Nano
+// bootloader.
+#ifndef NANO_OLD_BOOTLOADER
+#define NANO_OLD_BOOTLOADER 0
+#endif
+#ifndef ENABLE_WATCHDOG
+#if NANO_OLD_BOOTLOADER
+#define ENABLE_WATCHDOG 0
+#else
+#define ENABLE_WATCHDOG 1
+#endif
+#endif
 
 // No complete frame for this long means the link is down, not an empty room.
 // 5 s covers a 1 s presence-mode report with margin. The datasheet names
@@ -116,13 +133,44 @@ static_assert(RANGE_MIN_CM < RANGE_MAX_CM, "RANGE_MIN_CM must be below RANGE_MAX
 #include "ui.h"
 #include <avr/wdt.h>
 
-uint8_t gMcusr __attribute__((section(".noinit")));
-void wdtEarly(void) __attribute__((section(".init3")));
-void wdtEarly(void) {
-  gMcusr = MCUSR;
-  MCUSR = 0;
-  wdt_disable();
+// Optiboot and stk500v2 clear MCUSR before the sketch, so a .noinit cookie
+// set in the watchdog ISR is the reset marker. Cleared after it is shown.
+static const uint32_t kWdtCookie = 0xC4001A5AUL;
+volatile uint32_t gWdtCookie __attribute__((section(".noinit")));
+
+// Falls through into the next .init section (no prologue, no ret). `used`
+// keeps LTO and --gc-sections from dropping it. Disarms a watchdog that
+// a previous sketch left running. Does not read MCUSR.
+__attribute__((naked, used, section(".init3"))) void wdtEarly(void) {
+  __asm__ __volatile__(
+      "cli\n\t"
+      "wdr\n\t"
+      "sts %0, %1\n\t"
+      "sts %0, __zero_reg__\n\t"
+      :
+      : "M"(_SFR_MEM_ADDR(WDTCSR)), "r"((uint8_t)(_BV(WDCE) | _BV(WDE))));
 }
+
+#if ENABLE_WATCHDOG
+ISR(WDT_vect) {
+  gWdtCookie = kWdtCookie;
+  // Interrupt consumed this timeout. Arm a short system reset so Optiboot
+  // still has time to disable the watchdog. Then spin.
+  wdt_enable(WDTO_60MS);
+  for (;;) {
+  }
+}
+
+static void armWatchdog() {
+  cli();
+  wdt_reset();
+  MCUSR = (uint8_t)(MCUSR & (uint8_t)~_BV(WDRF));
+  WDTCSR |= _BV(WDCE) | _BV(WDE);
+  // 8 s, interrupt and reset. WDP3|WDP0 is the 1024K prescaler.
+  WDTCSR = _BV(WDIE) | _BV(WDE) | _BV(WDP3) | _BV(WDP0);
+  sei();
+}
+#endif
 
 #if RADAR_PORT_IS_SOFT
 C4001Sensor radar(RANGE_MIN_CM, RANGE_MAX_CM, RANGE_THRESHOLD,
@@ -195,18 +243,113 @@ static void showCfgFail() {
 }
 
 static void showNoRx() {
+  uiStartup(tft, BANNER_NORX, F("No bytes"), F("sensor silent"));
+}
+
+static void showCmdRx() {
 #if RADAR_LINK == RADAR_LINK_SOFT
-  uiStartup(tft, BANNER_NORX, F("Check D7"), F("UNO to sensor RX"));
+  uiStartup(tft, BANNER_CMDRX, F("Check D7"), F("commands, frames ok"));
 #elif RADAR_LINK == RADAR_LINK_SERIAL1
-  uiStartup(tft, BANNER_NORX, F("Check pin 18"), F("to sensor RX"));
+  uiStartup(tft, BANNER_CMDRX, F("Check pin 18"), F("commands, frames ok"));
 #else
-  uiStartup(tft, BANNER_NORX, F("Check TX wire"), F("board to sensor RX"));
+  uiStartup(tft, BANNER_CMDRX, F("Check TX wire"), F("commands, frames ok"));
 #endif
+}
+
+#if FEATURE_BATTERY
+static uint16_t readVccMv() {
+#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+  ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  ADCSRB &= ~_BV(MUX5);
+#else
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#endif
+  delay(2);
+  ADCSRA |= _BV(ADSC);
+  while (ADCSRA & _BV(ADSC)) {
+  }
+  (void)ADC;
+  delay(2);
+  ADCSRA |= _BV(ADSC);
+  while (ADCSRA & _BV(ADSC)) {
+  }
+  const uint16_t raw = ADC;
+  if (raw == 0) {
+    return 5000;
+  }
+  // Nominal 1.1 V bandgap, scaled with 1024 counts: 1.1 * 1024 * 1000.
+  return (uint16_t)(1126400UL / raw);
+}
+
+static uint32_t gLastBatMs = 0;
+
+static void sampleBattery(Adafruit_ILI9341 &panel, uint32_t now, bool force) {
+  if (!force && gLastBatMs != 0 && (uint32_t)(now - gLastBatMs) < 3000UL) {
+    return;
+  }
+  gLastBatMs = now;
+  (void)analogRead(BATTERY_PIN);
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < 8; i++) {
+    sum += analogRead(BATTERY_PIN);
+    wdt_reset();
+  }
+  const uint32_t vcc = readVccMv();
+  const uint16_t adc = (uint16_t)(sum / 8UL);
+  const uint16_t sample =
+      (uint16_t)(((uint32_t)adc * vcc * 147UL) / (1024UL * 47UL));
+  static uint16_t filt = 0;
+  static bool seeded = false;
+  if (!seeded) {
+    filt = sample;
+    seeded = true;
+  } else {
+    filt = (uint16_t)(((uint32_t)filt * 7UL + sample) / 8UL);
+  }
+  static uint16_t shownMv = 0;
+  static bool low = false;
+  if (shownMv == 0 || (uint16_t)abs((int)filt - (int)shownMv) >= 50) {
+    shownMv = filt;
+  }
+  if (filt <= LOW_BATTERY_MV) {
+    low = true;
+  } else if (filt >= LOW_BATTERY_CLEAR_MV) {
+    low = false;
+  }
+  int pct = 0;
+  if (shownMv >= 8400) {
+    pct = 100;
+  } else if (shownMv > 6000) {
+    pct = (int)(((uint32_t)shownMv - 6000UL) * 100UL / 2400UL);
+  }
+  uiBattery(panel, shownMv, pct, low);
+}
+#endif
+
+#if FEATURE_STATUS_LED
+void statusLedPoll() {
+  const uint32_t now = millis();
+  const bool fault = !gReady || radar.configUnverified();
+  if (fault) {
+    digitalWrite(STATUS_LED_PIN, ((now / 150UL) & 1UL) ? HIGH : LOW);
+  } else {
+    digitalWrite(STATUS_LED_PIN, ((now / 500UL) & 1UL) ? HIGH : LOW);
+  }
+}
+#endif
+
+static void holdWithWdt(uint16_t ms) {
+  const uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < ms) {
+    wdt_reset();
+    C4001_STATUS_POLL();
+    delay(20);
+  }
 }
 
 static void tryBringUp() {
   if (sBanner != BANNER_NOSENSOR && sBanner != BANNER_NORX &&
-      sBanner != BANNER_CFGFAIL) {
+      sBanner != BANNER_CMDRX && sBanner != BANNER_CFGFAIL) {
     showSearch();
   }
   // A stale timestamp must not count as a live sensor.
@@ -218,23 +361,38 @@ static void tryBringUp() {
   }
   if (!gConfigTried) {
     gConfigTried = true;
-    if (sBanner != BANNER_NORX && sBanner != BANNER_CFGFAIL) {
+    if (sBanner != BANNER_NORX && sBanner != BANNER_CMDRX &&
+        sBanner != BANNER_CFGFAIL) {
       uiStartup(tft, BANNER_CONFIG, F("Checking"), F("radar settings"));
     }
     wdt_reset();
     const bool running = radar.configure();
     wdt_reset();
-    if (!running && !radar.heardBytes()) {
-      showNoRx();
-      logIfRoom(F("sensor RX timeout"));
+    if (!running) {
+      // Stay here and retry. Do not arm the live screen on a dead command.
+      if (!radar.heardBytes()) {
+        showNoRx();
+        logIfRoom(F("sensor silent"));
+      } else {
+        showCmdRx();
+        logIfRoom(F("NO SENSOR RX"));
+      }
       gConfigTried = false;
       gReady = false;
       return;
     }
-    if (!running || (radar.configUnverified() && radar.configError() != 0 &&
-                     !radar.rxTimedOut())) {
+    if (radar.configUnverified() && radar.configError() != 0 &&
+        !radar.rxTimedOut()) {
       showCfgFail();
       logIfRoom(radar.configError() ? radar.configError() : F("config failed"));
+      holdWithWdt(1200);
+    }
+    if (radar.lastFrameMs() == 0) {
+      showNoSensor();
+      logIfRoom(F("no frame after config"));
+      gConfigTried = false;
+      gReady = false;
+      return;
     }
   }
   smoother.reset();
@@ -242,12 +400,15 @@ static void tryBringUp() {
   gLastPresent = false;
   gLastDist = -1;
   uiArmRunning(tft);
-  if (gMcusr & _BV(WDRF)) {
-    uiWarn(tft, F("WDT RESET"));
-    logIfRoom(F("WDT RESET"));
-  } else if (radar.configUnverified()) {
+#if FEATURE_BATTERY
+  sampleBattery(tft, millis(), true);
+#endif
+  if (radar.configUnverified()) {
     uiWarn(tft, radar.configError() ? radar.configError() : F("CFG UNVERIFIED"));
     logIfRoom(radar.configError() ? radar.configError() : F("config unverified"));
+  } else if (radar.modeMismatch()) {
+    uiWarn(tft, F("WRONG MODE"));
+    logIfRoom(F("WRONG MODE"));
   } else {
     logIfRoom(F("radar ready"));
   }
@@ -258,7 +419,9 @@ static void logFix(const TargetFix &fix) {
   if (fix.present == gLastPresent && dist == gLastDist) {
     return;
   }
-  if (Serial.availableForWrite() < 32) {
+  // "PRESENT 2500cm -32768cm/s e=65535" is about 36 bytes. The old 32-byte
+  // guard dropped that line or sliced it across a full USB buffer.
+  if (Serial.availableForWrite() < 48) {
     return;
   }
   gLastPresent = fix.present;
@@ -282,6 +445,12 @@ static void logFix(const TargetFix &fix) {
 }
 
 void setup() {
+#if ENABLE_WATCHDOG
+  const bool wdtBoot = gWdtCookie == kWdtCookie;
+#else
+  const bool wdtBoot = false;
+#endif
+  gWdtCookie = 0;
   Serial.begin(115200);
   holdShieldIdlePins();
 #if FEATURE_STATUS_LED
@@ -297,14 +466,25 @@ void setup() {
 #endif
   tft.begin();
   tft.setRotation(TFT_ROTATION);
-  wdt_enable(WDTO_8S);
+#if ENABLE_WATCHDOG
+  armWatchdog();
+#else
+  wdt_disable();
+#endif
   uiBegin(tft);
-  if (gMcusr & _BV(WDRF)) {
+  if (wdtBoot) {
     uiStartup(tft, BANNER_START, F("WDT RESET"), F("recovering"));
+    logIfRoom(F("WDT RESET"));
+    holdWithWdt(1500);
   }
 #if FEATURE_MODE_BUTTON
   if (digitalRead(MODE_BUTTON_PIN) == LOW) {
-    uiStartup(tft, BANNER_START, F("SELF TEST"), F("upload self_test"));
+    delay(40);
+    wdt_reset();
+    if (digitalRead(MODE_BUTTON_PIN) == LOW) {
+      uiStartup(tft, BANNER_START, F("SELF TEST"), F("upload self_test"));
+      holdWithWdt(1200);
+    }
   }
 #endif
   showSearch();
@@ -313,42 +493,63 @@ void setup() {
   gNextTryMs = millis() + 1200;
 }
 
-static void serviceExtras(const TargetFix &shown, bool haveFix, uint32_t now) {
+static void serviceExtras(const TargetFix &raw, const TargetFix &shown,
+                          bool haveFix, uint32_t now) {
 #if FEATURE_SERIAL_LOG
-  if (haveFix && Serial.availableForWrite() > 24) {
-    Serial.print(F("csv,"));
-    Serial.print(shown.distanceCm);
-    Serial.print(',');
-    Serial.print(shown.speedCms);
-    Serial.print(',');
-    Serial.println((unsigned)shown.energy);
+  static bool csvHeader = false;
+  if (!csvHeader && Serial.availableForWrite() >= 52) {
+    csvHeader = true;
+    Serial.println(F("ms,present,raw_cm,raw_cms,raw_e,sm_cm,sm_cms,sm_e"));
+  }
+  if (haveFix && csvHeader) {
+    char line[64];
+    uint8_t n = 0;
+    char tmp[12];
+    ultoa(now, tmp, 10);
+    for (uint8_t c = 0; tmp[c] != 0 && (unsigned)n + 1U < sizeof(line); c++) {
+      line[n++] = tmp[c];
+    }
+    const long fields[7] = {
+        raw.present ? 1L : 0L,
+        raw.hasDistance ? (long)raw.distanceCm : -1L,
+        raw.hasSpeed ? (long)raw.speedCms : -1L,
+        raw.hasEnergy ? (long)raw.energy : -1L,
+        shown.hasDistance ? (long)shown.distanceCm : -1L,
+        shown.hasSpeed ? (long)shown.speedCms : -1L,
+        shown.hasEnergy ? (long)shown.energy : -1L};
+    for (uint8_t i = 0; i < 7; i++) {
+      if ((unsigned)n + 1U < sizeof(line)) {
+        line[n++] = ',';
+      }
+      ltoa(fields[i], tmp, 10);
+      for (uint8_t c = 0; tmp[c] != 0 && (unsigned)n + 1U < sizeof(line); c++) {
+        line[n++] = tmp[c];
+      }
+    }
+    line[n] = 0;
+    if (Serial.availableForWrite() > (int)n + 2) {
+      Serial.println(line);
+    }
   }
 #else
+  (void)raw;
   (void)shown;
   (void)haveFix;
 #endif
 #if FEATURE_BATTERY
-  static uint32_t lastBatMs = 0;
-  static uint16_t batMv = 0;
-  if ((uint32_t)(now - lastBatMs) > 3000UL) {
-    lastBatMs = now;
-    uint32_t sum = 0;
-    for (uint8_t i = 0; i < 8; i++) {
-      sum += analogRead(BATTERY_PIN);
-    }
-    const uint16_t adc = (uint16_t)(sum / 8);
-    batMv = (uint16_t)((adc * 5000UL * 147UL) / (1023UL * 47UL));
-    const int pct = batMv <= 6000 ? 0 : (batMv >= 8400 ? 100 : (int)((batMv - 6000UL) * 100UL / 2400UL));
-    uiBattery(tft, batMv, pct, batMv <= LOW_BATTERY_MV);
+  if (gReady) {
+    sampleBattery(tft, now, false);
   }
 #endif
 #if FEATURE_BACKLIGHT_PWM
   static uint32_t lastTargetMs = 0;
-  if (haveFix && shown.present) {
+  if (gReady && haveFix && shown.present) {
     lastTargetMs = now;
   }
-  const bool idle = lastTargetMs != 0 && (uint32_t)(now - lastTargetMs) > BACKLIGHT_IDLE_MS;
-  analogWrite(BACKLIGHT_PIN, idle ? BACKLIGHT_DIM : 255);
+  const bool dimOk =
+      gReady && lastTargetMs != 0 &&
+      (uint32_t)(now - lastTargetMs) > BACKLIGHT_IDLE_MS;
+  analogWrite(BACKLIGHT_PIN, dimOk ? BACKLIGHT_DIM : 255);
 #endif
 #if FEATURE_STATUS_LED
   const bool fault = !gReady || radar.configUnverified();
@@ -366,9 +567,8 @@ static void serviceExtras(const TargetFix &shown, bool haveFix, uint32_t now) {
 void loop() {
   const uint32_t now = millis();
   wdt_reset();
-  uiHeartbeat(tft);
   if (!gReady) {
-    serviceExtras(TargetFix(), false, now);
+    serviceExtras(TargetFix(), TargetFix(), false, now);
     if ((int32_t)(now - gNextTryMs) < 0) {
       return;
     }
@@ -395,11 +595,15 @@ void loop() {
   TargetFix raw;
   TargetFix shown;
   if (!radar.read(raw)) {
-    serviceExtras(TargetFix(), false, now);
+    if (radar.modeMismatch()) {
+      uiWarn(tft, F("WRONG MODE"));
+    }
+    serviceExtras(TargetFix(), TargetFix(), false, now);
     return;
   }
+  uiHeartbeat(tft);
   smoother.apply(raw, shown);
   uiRefresh(tft, shown, capsFor(radar));
   logFix(shown);
-  serviceExtras(shown, true, now);
+  serviceExtras(raw, shown, true, now);
 }

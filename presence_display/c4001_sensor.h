@@ -70,6 +70,7 @@ class C4001Sensor : public PresenceSensor {
   bool rxTimedOut() const override { return _rxTimedOut; }
   bool configUnverified() const { return _unverified; }
   bool heardBytes() const { return _heardBytes; }
+  bool modeMismatch() const { return _modeMismatch; }
   void invalidate();
   const __FlashStringHelper *name() const override { return F("C4001"); }
   const __FlashStringHelper *modeName() const override {
@@ -122,6 +123,7 @@ class C4001Sensor : public PresenceSensor {
   bool _unverified;
   bool _crlf;
   bool _heardBytes;
+  bool _modeMismatch;
   const __FlashStringHelper *_fault;
   uint32_t _lastFrameMs;
   char _buf[kBufCap];
@@ -171,6 +173,7 @@ inline C4001Sensor::C4001Sensor(uint16_t minCm, uint16_t maxCm,
       _unverified(false),
       _crlf(false),
       _heardBytes(false),
+      _modeMismatch(false),
       _fault(0),
       _lastFrameMs(0),
       _len(0) {
@@ -194,9 +197,17 @@ inline bool C4001Sensor::begin() {
   return true;
 }
 
+#if defined(FEATURE_STATUS_LED) && FEATURE_STATUS_LED
+void statusLedPoll();
+#define C4001_STATUS_POLL() statusLedPoll()
+#else
+#define C4001_STATUS_POLL() ((void)0)
+#endif
+
 inline void C4001Sensor::invalidate() {
   _lastFrameMs = 0;
   _knowMode = false;
+  _modeMismatch = false;
   _len = 0;
   _buf[0] = 0;
   while (port().available() > 0) {
@@ -491,6 +502,7 @@ inline bool C4001Sensor::probe() {
     }
     delay(5);
     wdt_reset();
+    C4001_STATUS_POLL();
   }
   // No stream. A module left stopped is recovered with sensorStart only.
   // That command does not write the module's flash.
@@ -511,6 +523,8 @@ inline bool C4001Sensor::probe() {
       }
     }
     delay(5);
+    wdt_reset();
+    C4001_STATUS_POLL();
   }
   return false;
 }
@@ -557,9 +571,11 @@ inline uint8_t C4001Sensor::exchange(const char *cmd, uint16_t timeoutMs,
     }
     delay(2);
     wdt_reset();
+    C4001_STATUS_POLL();
   }
   delay(100);
   wdt_reset();
+  C4001_STATUS_POLL();
   return 0;
 }
 
@@ -591,6 +607,7 @@ inline bool C4001Sensor::waitFrame(uint16_t timeoutMs) {
     }
     delay(5);
     wdt_reset();
+    C4001_STATUS_POLL();
   }
   return false;
 }
@@ -625,6 +642,7 @@ inline bool C4001Sensor::configure() {
   _rxTimedOut = false;
   _unverified = false;
   _heardBytes = false;
+  _modeMismatch = false;
 
   // Done: stopped now. Error: datasheet "already not running". Both are fine.
   // Timeout is a missing RX answer, not proof the module is absent.
@@ -632,7 +650,9 @@ inline bool C4001Sensor::configure() {
   if (stopped == 0) {
     _rxTimedOut = true;
     _unverified = true;
-    _fault = F("NO SENSOR RX");
+    // Zero bytes: the module went silent. Frames with no Done: commands
+    // are not reaching the module (open D7) while the stream is still up.
+    _fault = _heardBytes ? F("NO SENSOR RX") : F("NO RX");
     return false;
   }
 
@@ -802,12 +822,19 @@ inline bool C4001Sensor::configure() {
   }
 
   // A failed save must be retried next boot even if RAM read-back matches.
+  // 1023 is the last byte of a 1024-byte EEPROM (Uno/Nano). Skip it if the
+  // part is smaller so we do not write past the end.
   static const int kEePending = 1023;
-  const bool savePending = EEPROM.read(kEePending) == 0xA5;
+  const bool eeOk = (unsigned)kEePending < EEPROM.length();
+  const bool savePending = eeOk && EEPROM.read(kEePending) == 0xA5;
   if (dirty || savePending) {
-    EEPROM.update(kEePending, 0xA5);
+    if (eeOk) {
+      EEPROM.update(kEePending, 0xA5);
+    }
     if (transact("saveConfig", 2000) == kDone) {
-      EEPROM.update(kEePending, 0x00);
+      if (eeOk) {
+        EEPROM.update(kEePending, 0x00);
+      }
     } else {
       _unverified = true;
       _fault = F("saveConfig");
@@ -816,13 +843,21 @@ inline bool C4001Sensor::configure() {
   startModule();
   _len = 0;
   _knowMode = false;
-  if (!waitFrame(1500) || _speedMode != _ranging) {
+  const bool sawFrame = waitFrame(1500);
+  if (!sawFrame || _speedMode != _ranging) {
     _unverified = true;
     if (_fault == 0) {
       _fault = F("mode");
     }
+    if (sawFrame && _speedMode != _ranging) {
+      _modeMismatch = true;
+    }
   }
-  _lastFrameMs = millis();
+  // waitFrame() stamps _lastFrameMs only when it parsed a frame. A miss
+  // must not keep the probe timestamp, or the link looks healthy.
+  if (!sawFrame) {
+    _lastFrameMs = 0;
+  }
   return true;
 }
 
@@ -840,15 +875,19 @@ inline bool C4001Sensor::read(TargetFix &fix) {
   if (!parseFrame(line, fix)) {
     return false;
   }
-  // A frame from the other mode still proves the wire is up, but it is
-  // not a reading for the mode this sketch configured.
+  // Wrong-mode frames must not refresh the link timer. After
+  // LINK_TIMEOUT_MS the sketch drops to NO SENSOR, then CHECKING, and
+  // setRunApp runs again. Do not replace a fault we already recorded.
   if (_speedMode != _ranging) {
     _unverified = true;
-    _fault = F("mode");
-    _lastFrameMs = millis();
+    _modeMismatch = true;
+    if (_fault == 0) {
+      _fault = F("mode");
+    }
     return false;
   }
   fix.valid = true;
+  _modeMismatch = false;
   _lastFrameMs = millis();
   return true;
 }

@@ -29,7 +29,7 @@ Portrait, USB socket at the top of the UNO. If the picture is upside down, set `
 | Cone | Sensor at the bottom, looking up the screen. A yellow arc is the range across the full horizontal beam. The white number at the lower right is the configured maximum. |
 | SPEED / ENERGY | Relative speed (m/s) and signal energy, in ranging mode. Hidden while the presence hold is coasting. |
 
-`SEARCHING` means the sketch is waiting for a `$...*` frame. `CHECKING` means it has stopped the module and is reading the settings back. That happens on boot, and again after a link loss once a new frame is seen. `NO SENSOR` means no frames (power, or the module TX wire into D6). `NO RX` means a command was sent and no bytes came back at all (the D7 divider and the module RX pin). `CFG FAIL` names a command that did not return `Done`; the sketch then keeps reading if frames are still arriving, and the yellow line at the bottom is that command name. A white dot at the bottom right blinks while the loop is running. The big distance ignores steps smaller than 7 cm. `WDT RESET` means the 8 s watchdog fired.
+`SEARCHING` means the sketch is waiting for a `$...*` frame. `CHECKING` means it has stopped the module and is reading the settings back. That happens on boot, and again after a link loss once a new frame is seen. `NO SENSOR` means no frames (power, or the module TX wire into D6). `NO RX` means `sensorStop` got no bytes at all: the module went silent. The sketch stays on that screen and retries. It does not open the live view. `NO SENSOR RX` means bytes are still arriving (usually frames) but the command never returned `Done`. That is the open command wire: UNO D7, or Mega pin 18, is not reaching module RX, while module TX still reaches the board. The sketch stays on that screen and retries. `CFG FAIL` names a later command that did not return `Done`. That banner stays up for about 1.2 s, then the live screen returns if a frame was seen after start, and the yellow line at the bottom is that command name. A frame from the other mode does not refresh the link timer. After 5 s with no matching frame the banner goes to `NO SENSOR`, then `CHECKING` runs again. A white dot just above the yellow line blinks only after a frame is accepted, and at most every 250 ms. The big distance ignores steps smaller than 7 cm. `WDT RESET` means the watchdog fired. It stays up for about 1.5 s and is then cleared, so a later yellow line can still say `CFG UNVERIFIED`.
 
 The display runs with no Serial Monitor. The sketch does not wait for USB.
 
@@ -167,6 +167,12 @@ You can leave USB connected for the Serial Monitor while a barrel supply is plug
 
 Do not feed a second 5 V supply into the 5 V header while the USB plug is also powering the board from a computer.
 
+### Watchdog
+
+The sketch arms an 8 s watchdog on a Uno, a Mega, and a Nano with the normal bootloader. It is reset during the long command waits, so a normal `CHECKING` pass does not reboot the board. Optiboot clears the reset-cause register before the sketch runs, so a watchdog reset is remembered with a flag in RAM that survives the reset, not by reading `MCUSR`. The flag is cleared after `WDT RESET` is shown.
+
+If the board resets in a loop, unplug USB and any barrel supply, then upload again. Do not use the Nano menu **ATmega328P (Old Bootloader)**. That bootloader does not clear a watchdog reset and can bootloop, and the menu does not pass its own compiler flag. If you must use that menu, set `#define NANO_OLD_BOOTLOADER 1` at the top of `presence_display.ino`. That leaves the watchdog off. Prefer a Uno, or a Nano with the new bootloader.
+
 ## Libraries
 
 The sketches talk to the C4001 directly. They do not link `DFRobot_C4001`. That library's `sensorStop()` waits forever for an echo, and every setter calls it. The command set in the sketch is the one documented for SEN0609 (sensorStop, get/set, saveConfig, sensorStart) with a timeout on each reply.
@@ -204,9 +210,9 @@ Optional log: Serial Monitor at **115200**. Lines are printed only when the USB 
 | Sketch | What it checks |
 | --- | --- |
 | `tft_test/tft_test.ino` | Reads ILI9341 ID register 0xD3. **PASS** when the bytes are 93 41. Counter repaints one box. D4 held HIGH. |
-| `c4001_serial_test/c4001_serial_test.ino` | Radar only. Prints `PASS tx+rx` or `FAIL tx` / `FAIL rx`. Retries a silent command once with CRLF and checks `sensorStart`. After `FAIL link`, a returning stream prints `PASS` again. Heartbeat `hb frames=N` once a second. Does not save settings unless you are not using this sketch. |
-| `bringup_test/bringup_test.ino` | TFT ID and the radar TX/RX round trip on one screen. |
-| `self_test/self_test.ino` | TFT ID, link, frame rate, and mode prefix. Upload this to run the checks. |
+| `c4001_serial_test/c4001_serial_test.ino` | Radar only. Prints `PASS tx+rx` or `FAIL tx` / `FAIL rx`. Retries a silent command once with CRLF and checks `sensorStart`. After `FAIL link`, a returning stream prints `PASS` again. Heartbeat `hb frames=N` once a second. Does not save settings. Upload the main sketch again when you are finished with this test. |
+| `bringup_test/bringup_test.ino` | TFT ID and the radar TX/RX round trip on one screen. A silent `sensorStart` or `sensorStop` is retried once with CRLF. |
+| `self_test/self_test.ino` | TFT ID, link, frame rate, mode (`RANGE` or `PRES` from a full-line scan for `$DFDMD` / `$DFHPD`), frame-gap min/max/mean, a few raw frames on Serial, a stack margin, and a `getRange` query on D7 (CRLF if the first try is silent). Upload this to run the checks. |
 | `serial_passthrough/serial_passthrough.ino` | Throwaway bridge. Monitor at 115200, module at 9600 on D6/D7. Type commands yourself. |
 
 ### Sensor unplugged mid-run
@@ -216,7 +222,7 @@ This was not run on hardware here. The procedure:
 1. Upload `presence_display` and wait until the banner is PRESENT or CLEAR.
 2. Unplug the yellow wire (module TX to D6), or unplug the module.
 3. Within `LINK_TIMEOUT_MS` (5 s) the banner should leave PRESENT/CLEAR and show NO SENSOR. It should not sit on CLEAR, and it should not flip back to the live screen while the wire is still out.
-4. Plug the wire back. The sketch must see a new frame before it marks the sensor ready, then it checks settings again. `NO RX` stays up only when a command gets no bytes back. `c4001_serial_test` should print `PASS tx+rx` again after `FAIL link`.
+4. Plug the wire back. The sketch must see a new frame before it marks the sensor ready, then it checks settings again. `NO RX` stays up when a command gets no bytes at all. `NO SENSOR RX` stays up when frames continue but commands get no `Done` (the D7 wire). `c4001_serial_test` should print `PASS tx+rx` again after `FAIL link`.
 
 ## Settings
 
@@ -231,7 +237,7 @@ All of these are at the top of `presence_display/presence_display.ino`.
 | `PRESET_INDOOR` (default) | 0.6–6 m | 22 |
 | `PRESET_OUTDOOR` | 0.6–15 m | 12 |
 
-Threshold is the ranging-mode factor. Larger means a stronger return is required. Indoor walls reflect 24 GHz, so the short gate is the default. Outdoors, wind-moved foliage and rain can chatter the banner; raise the threshold if they do. In sun the backlight stays fully on.
+Threshold is the ranging-mode factor. Larger means a stronger return is required. Indoor walls reflect 24 GHz, so the short gate is the default. Outdoors, wind-moved foliage and rain can chatter the banner; raise the threshold if they do. The backlight stays fully on unless `FEATURE_BACKLIGHT_PWM` is enabled, and even then it does not dim a fault banner.
 
 DFRobot says the distance figure is a guide, not a calibrated measurement, and that there is about a meter of transition past the configured maximum. The 25 m datasheet also puts useful ranging at about 1.2 m and up, so a reading under that is weak even though the sketch allows a 0.6 m minimum.
 
@@ -298,20 +304,21 @@ The on-screen arc is that distance across the whole 100° beam.
 | Frame assembly | 80 bytes | A ranging frame is under 50 bytes. 80 bytes holds one frame plus the start of the next, so the newest complete `$...*` can be kept. Longer junk is dropped, not parsed. |
 | One parsed line | 56 bytes, stack, only while parsing | Shorter than the assembly buffer on purpose. An over-long frame is discarded. |
 | Command reply | The same 80-byte frame buffer, only during CHECKING | One reply at a time. The front of the buffer is kept so `Response` is not slid away before `Done`. |
+| Save-pending flag | EEPROM address 1023 | Used only when `EEPROM.length()` is greater than 1023, so a smaller EEPROM is not written past the end. |
 
 `TargetFix` on the UNO is integers (centimeters, cm/s, energy). The angle and x/y fields are compiled only with `CONE_DIRECTIONAL`.
 
 ## Optional hardware
 
-These `#define`s are at the top of `presence_display.ino`. They default to 0. The default Uno build is the one without them. Turning them all on, plus the directional overlay, is about 90% of Uno flash.
+These `#define`s are at the top of `presence_display.ino`. They default to 0. The default Uno build is the one without them. Turning them all on uses about 91% of Uno flash. Adding the directional overlay as well uses about 95%.
 
 | Define | Wiring |
 | --- | --- |
-| `FEATURE_BATTERY` | 100 kΩ from the battery positive (2S 18650, about 6.0–8.4 V) to A1, and 47 kΩ from A1 to GND. The sketch averages 8 samples and refreshes every 3 s. Low warning is about 6.6 V. |
-| `FEATURE_BACKLIGHT_PWM` | Solder the shield's **Lite / #3** jumper, and cut the trace that holds the backlight on hard, or the pin cannot dim it. D3 PWM. Full brightness while a target is present. Dims after `BACKLIGHT_IDLE_MS` (20 s) with no target. |
-| `FEATURE_STATUS_LED` | A0 through 330 Ω to an LED to GND. Solid = target. Slow blink = clear. Fast blink = no sensor or a config fault. |
-| `FEATURE_SERIAL_LOG` | No extra wire. USB serial CSV: `csv,centimetres,cm/s,energy`. Use it to compare the open module with the case window. |
-| `FEATURE_MODE_BUTTON` | Momentary button from D5 to GND. The pin is pulled up. Held at boot, the main sketch only shows that `self_test` is the full check. Upload `self_test` to run it. |
+| `FEATURE_BATTERY` | 100 kΩ from the battery positive (2S 18650, about 6.0–8.4 V) to A1, and 47 kΩ from A1 to GND. Put the divider after the power switch so it does not drain the pack while the switch is off. Add a 100 nF capacitor from A1 to GND. The sketch reads the 1.1 V bandgap so a sagging 5 V rail does not scale the result, divides by 1024, and filters slowly. The screen shows volts. The number moves only when the filtered reading changes by about 50 mV. `~` marks the percent as approximate (6.0 V is 0%, 8.4 V is 100%). LOW appears at 6.6 V and clears at 6.9 V. The first sample is taken when the live screen arms, then about every 3 s. It is not drawn during SEARCHING or CHECKING. A 5 V buck converter is the better way to feed the Uno from a 2S pack: measure the pack on the battery side of the converter, not on the 5 V output. If you use the barrel jack or VIN instead, keep Vin at 7 V or above (prefer 7–9 V). The other wiring, if you do not want the bandgap read, is the internal 1.1 V ADC reference and a 330 kΩ / 47 kΩ divider. This sketch uses the bandgap measurement with the 100 kΩ / 47 kΩ divider. |
+| `FEATURE_BACKLIGHT_PWM` | This sketch assumes the Adafruit 1651 **v2 resistive** shield. On that board, solder the **LITE / #3** jumper only. D3 is then PWM. Full brightness during SEARCHING, CHECKING, NO SENSOR, NO RX, NO SENSOR RX, and CFG FAIL. The backlight dims to about 90 (of 255) only when the live screen is up, a target has been seen at least once, and no target has been present for `BACKLIGHT_IDLE_MS` (20 s). On the 1651 **v2 capacitive** shield the backlight pin is D5, which is the mode button here. Do not enable both on that shield. |
+| `FEATURE_STATUS_LED` | A0 through 330 Ω to an LED to GND. Solid = target. Slow blink = clear. Fast blink = no sensor, CHECKING (including the command waits), or a config fault. |
+| `FEATURE_SERIAL_LOG` | No extra wire. USB serial CSV. The header is `ms,present,raw_cm,raw_cms,raw_e,sm_cm,sm_cms,sm_e`. Each later line is `millis()`, the raw frame, and the smoothed numbers. Missing fields are `-1`. |
+| `FEATURE_MODE_BUTTON` | Momentary button from D5 to GND. The pin is pulled up. Held at boot, after a short debounce, the sketch shows `SELF TEST` for about 1.2 s and then continues. Upload `self_test` to run the full check. |
 
 D5, A0, and A1 are free of the shield's SPI, D4, and the radar on D6/D7. Leave them alone unless you turn the matching feature on.
 
@@ -332,17 +339,18 @@ Two ideas for a later Mega build, not in this firmware: an IMU to ignore reading
 | White TFT, or `tft_test` prints FAIL | Reseat the shield, including ICSP. PASS needs ID bytes 93 41. |
 | Picture upside down | `TFT_ROTATION` 2. |
 | `NO SENSOR` / serial test `FAIL tx` | 5V, GND, module TX to D6, DIP switch on UART if there is one. |
-| `NO RX` / serial test `FAIL rx` | UNO D7 must reach module RX through the 1 kΩ (brown-black-red). The 2 kΩ or 2.2 kΩ (red-black-red or red-red-red) goes from module RX to GND. Swapping those resistors puts about 1.7 V on RX, which may not register as a high. Module TX still goes straight to D6. Frames on the screen or in the serial test mean that direction works. |
-| Yellow command name under a live banner | That setting was not confirmed. Frames are still shown. Reset the board to try CHECKING again. |
-| `CFG FAIL` and a command name | That command did not return `Done`. If frames are still coming, the live screen returns with the same name on the yellow line. |
-| `NO RX` | A command went out and nothing came back. Check D7, the 1 kΩ series resistor, and the 2 kΩ or 2.2 kΩ leg to GND. Module TX still goes straight to D6. |
+| `NO RX` / serial test `FAIL rx` | `sensorStop` got no bytes. Check power, GND, and both UART wires. UNO D7 must reach module RX through the 1 kΩ (brown-black-red). The 2 kΩ or 2.2 kΩ (red-black-red or red-red-red) goes from module RX to GND. Swapping those resistors puts about 1.7 V on RX, which may not register as a high. Module TX still goes straight to D6. |
+| `NO SENSOR RX` | Frames are arriving, but commands get no `Done`. The command wire is open: D7 (or Mega pin 18) through the 1 kΩ to module RX. The sketch keeps retrying and does not open the live view. |
+| Yellow command name under a live banner | That setting was not confirmed. Frames are still shown. Reset the board to try CHECKING again. `WRONG MODE` means a frame from the other mode arrived. It does not refresh the link timer, so after 5 s the sketch goes to NO SENSOR and then CHECKING. |
+| `CFG FAIL` and a command name | That command did not return `Done`. The banner stays about 1.2 s. If a frame was seen after start, the live screen returns with the same name on the yellow line. |
 | `FAIL link` or NO SENSOR after it was working | The TX wire or the module dropped. Within 5 s the live screen should stay on NO SENSOR. Plug the wire back; a new frame is required before CHECKING runs again. |
 | Banner flickers while you walk | Expected. Hold still. Lengthen `PRESENCE_HOLD_MS` or set `FRETTING_DETECTION` to 0. |
 | Ghosts indoors | Shorten `RANGE_MAX_CM` or stay on `PRESET_INDOOR`. |
 | Chatter outdoors in wind or rain | Raise `RANGE_THRESHOLD`. |
 | Range looks wrong | DFRobot says it is not calibrated. Targets under about 1 m are weak. |
 | Upload fails | Close the Serial Monitor. The radar should not be on D0/D1. |
-| Backlight off | LITE/#3 was closed. This sketch drives D3 HIGH. |
+| Backlight off | On the 1651 v2 resistive shield, solder LITE/#3. This sketch drives D3 HIGH unless the PWM feature is dimming an idle live screen. |
+| Reset loop, or `WDT RESET` every boot | Power-cycle (unplug USB and the barrel jack), then upload. Avoid the Nano **Old Bootloader** menu. See [Watchdog](#watchdog). |
 
 ## Bench checklist
 
@@ -376,7 +384,7 @@ F. If the first command is silent and the CRLF retry answers, later commands sho
 
 G. DIP switch: UART on a SEN0610. On a SEN0609, confirm whether the switch exists.
 
-H. Watchdog, stack, and boot: a normal CHECKING pass must not reboot (the 8 s watchdog is petted during those waits). Worst case, if every reply times out and is retried, CHECKING can take about 11–27 s. Time a normal boot separately. `WDT RESET` on the screen means the watchdog actually fired.
+H. Watchdog, stack, and boot: a normal CHECKING pass must not reboot (the 8 s watchdog is petted during those waits). The long figure below is a sum of the timeouts in the sketch, not a stopwatch measurement. If every command the sketch always sends times out and is retried once (`sensorStop`, `getRange`, `getThrFactor`, `getMicroMotion`, `sensorStart`), plus `setRunApp` and the final 1.5 s frame wait, CHECKING is about 14 s. A `saveConfig` that is still pending from a failed save adds about 4 s, so about 18 s. A normal pass that gets `Done` on the first try is a few seconds. Time that one on the bench. `WDT RESET` on the screen means the watchdog fired. `self_test` prints a stack margin for that test sketch; it is not a measurement of CHECKING in the main sketch.
 
 ## Compile check
 
@@ -384,16 +392,18 @@ arduino-cli, `arduino:avr` 1.8.8.
 
 | Sketch | Board | Flash | RAM globals |
 | --- | --- | --- | --- |
-| `presence_display` default | Uno | 26474 bytes (82%) | 1090 bytes (53%), 958 bytes left |
-| same, all `FEATURE_*` on | Uno | 27888 bytes (86%) | 1098 bytes (53%) |
-| same, all features and `CONE_DIRECTIONAL 1` | Uno | 29032 bytes (90%) | 1111 bytes (54%) |
+| `presence_display` default | Uno | 26884 bytes (83%) | 1094 bytes (53%), 954 bytes left |
+| same, all `FEATURE_*` on | Uno | 29564 bytes (91%) | 1109 bytes (54%) |
+| same, `CONE_DIRECTIONAL 1` only | Uno | 28112 bytes (87%) | 1107 bytes (54%) |
+| same, all features and `CONE_DIRECTIONAL 1` | Uno | 30654 bytes (95%) | 1122 bytes (54%) |
 | `tft_test` | Uno | 13144 bytes (40%) | 450 bytes (21%) |
 | `c4001_serial_test` | Uno | 4808 bytes (14%) | 409 bytes (19%) |
-| `bringup_test` | Uno | 14122 bytes (43%) | 559 bytes (27%) |
-| `self_test` | Uno | 13874 bytes (43%) | 566 bytes (27%) |
+| `bringup_test` | Uno | 14244 bytes (44%) | 559 bytes (27%) |
+| `self_test` | Uno | 15746 bytes (48%) | 601 bytes (29%) |
 | `serial_passthrough` | Uno | 3190 bytes (9%) | 305 bytes (14%) |
-| `presence_display` | Nano (328P) | 26474 bytes (86% of 30720) | 1090 bytes |
-| `presence_display`, `RADAR_LINK_SERIAL1` | Mega | 26376 bytes (10%) | 1130 bytes |
-| same, plus `CONE_DIRECTIONAL 1` | Mega | 27590 bytes (10%) | 1143 bytes |
+| `presence_display` | Nano (328P) | 26884 bytes (87% of 30720) | 1094 bytes |
+| same, all features and `CONE_DIRECTIONAL 1` | Nano (328P) | 30654 bytes (99% of 30720) | 1122 bytes |
+| `presence_display`, `RADAR_LINK_SERIAL1` | Mega | 26814 bytes (10%) | 1134 bytes |
+| same, plus `CONE_DIRECTIONAL 1` | Mega | 28028 bytes (11%) | 1147 bytes |
 
-The default Uno image does not contain `dirSin256`. The 2.8" shield is Uno-shaped and does not seat on a Nano; that line only proves the ATmega328P build. CHECKING reuses the 80-byte frame buffer for one command reply. Worst case, if every reply times out and is retried, that pass is about 11–27 s. The 8 s watchdog is reset inside those waits. Adafruit BusIO still links Wire via the display stack.
+The default Uno image does not contain `dirSin256`. The Mega image with `CONE_DIRECTIONAL 1` does. The 2.8" shield is Uno-shaped and does not seat on a Nano; the Nano lines only prove the ATmega328P build. All features plus the directional overlay still fit a Nano, with little room left. CHECKING reuses the 80-byte frame buffer for one command reply. The long CHECKING figure in the bench list is a timeout sum (about 14 s, or about 18 s with a pending save), not a stopwatch measurement. The 8 s watchdog is reset inside those waits. Adafruit BusIO still links Wire via the display stack.

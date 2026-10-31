@@ -5,6 +5,10 @@
 #include "cone_view.h"
 #include "target.h"
 
+#ifndef DISTANCE_DEADBAND_CM
+#define DISTANCE_DEADBAND_CM 7
+#endif
+
 static const int16_t kScreenW = 240;
 static const int16_t kBannerH = 46;
 static const int16_t kDistY = 46;
@@ -23,6 +27,7 @@ enum BannerKind : uint8_t {
   BANNER_CLEAR,
   BANNER_NOSENSOR,
   BANNER_NORX,
+  BANNER_CMDRX,
   BANNER_CFGFAIL
 };
 
@@ -102,6 +107,11 @@ static void uiDrawBanner(Adafruit_ILI9341 &tft, uint8_t kind) {
       bg = ILI9341_YELLOW;
       fg = ILI9341_BLACK;
       text = F("NO RX");
+      break;
+    case BANNER_CMDRX:
+      bg = ILI9341_YELLOW;
+      fg = ILI9341_BLACK;
+      text = F("NO SENSOR RX");
       break;
     case BANNER_CFGFAIL:
       bg = ILI9341_RED;
@@ -288,28 +298,36 @@ static void uiHeartbeat(Adafruit_ILI9341 &tft) {
   }
   lastMs = now;
   on = !on;
-  tft.fillRect(232, 308, 6, 6, on ? ILI9341_WHITE : ILI9341_BLACK);
+  // Above the yellow warn strip (y 296-320), with a few pixels of gap.
+  tft.fillRect(232, 284, 6, 6, on ? ILI9341_WHITE : ILI9341_BLACK);
 }
-
-#ifndef DISTANCE_DEADBAND_CM
-#define DISTANCE_DEADBAND_CM 7
-#endif
 
 #if FEATURE_BATTERY
 static void uiBattery(Adafruit_ILI9341 &tft, uint16_t mv, int pct, bool low) {
-  tft.fillRect(4, 286, 160, 12, ILI9341_BLACK);
+  // Opaque digits, padded so a shorter reading erases the previous one.
+  // y 286 is 8 px tall: the bottom sits 2 px above the warn strip at y 296.
+  if (pct < 0) {
+    pct = 0;
+  }
+  if (pct > 100) {
+    pct = 100;
+  }
   tft.setTextSize(1);
   tft.setTextColor(low ? ILI9341_YELLOW : ILI9341_WHITE, ILI9341_BLACK);
-  tft.setCursor(4, 288);
+  tft.setCursor(4, 286);
   tft.print(mv / 1000);
   tft.print('.');
-  tft.print((mv % 1000) / 100);
-  tft.print(F("V "));
+  tft.print((mv / 100) % 10);
+  tft.print(F("V ~"));
+  if (pct < 100) {
+    tft.print(' ');
+  }
+  if (pct < 10) {
+    tft.print(' ');
+  }
   tft.print(pct);
   tft.print('%');
-  if (low) {
-    tft.print(F(" LOW"));
-  }
+  tft.print(low ? F(" LOW") : F("    "));
 }
 #endif
 

@@ -86,6 +86,10 @@ void setup() {
   if (!txOk) {
     radarPort.print(F("sensorStart"));
     txOk = seeFrame(1000);
+    if (!txOk) {
+      radarPort.print(F("sensorStart\r\n"));
+      txOk = seeFrame(1000);
+    }
   }
   bool rxOk = false;
   if (txOk) {
@@ -94,8 +98,15 @@ void setup() {
     }
     radarPort.print(F("sensorStop"));
     rxOk = waitToken("Done", 2000);
+    if (!rxOk) {
+      radarPort.print(F("sensorStop\r\n"));
+      rxOk = waitToken("Done", 2000);
+    }
     radarPort.print(F("sensorStart"));
-    waitToken("Done", 1000);
+    if (!waitToken("Done", 1000)) {
+      radarPort.print(F("sensorStart\r\n"));
+      waitToken("Done", 1000);
+    }
   }
 
   tft.setCursor(12, 120);
