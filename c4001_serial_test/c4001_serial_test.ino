@@ -1,11 +1,7 @@
-// C4001 UART test. Prints raw module readings to the USB serial port.
-// The TFT is not used. Numbers here are NOT smoothed; the handheld filter
-// lives in presence_display. Open the monitor at 115200 if you want the log.
-// The sketch does not wait for the monitor.
-//
-// Keep RADAR_LINK identical to the line in presence_display.ino.
-// Uno: RADAR_LINK_SOFT, sensor TX -> D6, sensor RX -> D7.
-// Do not use D4. The TFT shield reserves it for the microSD chip select.
+// Raw C4001 link test. No smoothing and no saved settings.
+// Monitor at 115200. The sketch does not wait for the monitor.
+// Keep RADAR_LINK identical to presence_display.ino.
+// Uno: sensor TX -> D6, sensor RX -> D7. D4 stays HIGH (shield SD select).
 
 #define RADAR_LINK_SOFT 0
 #define RADAR_LINK_SERIAL1 1
@@ -17,150 +13,146 @@
 #define RADAR_TX_PIN 7
 #define C4001_BAUD 9600
 #define SD_CS_PIN 4
-
-// Same gate as the indoor preset in presence_display.ino.
-#define RANGE_MIN_CM 60
-#define RANGE_MAX_CM 600
-#define RANGE_THRESHOLD 22
+#define LINK_TIMEOUT_MS 2000
 
 #if defined(ARDUINO_AVR_UNO) || defined(ESP8266)
 #if RADAR_LINK != RADAR_LINK_SOFT
-#error "Uno test builds use SoftwareSerial. Set RADAR_LINK to RADAR_LINK_SOFT."
+#error "This board (" ARDUINO_BOARD ") needs RADAR_LINK_SOFT."
 #endif
-#ifndef _SS_MAX_RX_BUFF
-#define _SS_MAX_RX_BUFF 128
-#endif
+#include <SoftwareSerial.h>
+SoftwareSerial radarPort(RADAR_RX_PIN, RADAR_TX_PIN);
+#define RADAR_PORT radarPort
 #else
 #if RADAR_LINK == RADAR_LINK_SOFT
-#error "Set RADAR_LINK to RADAR_LINK_SERIAL1 for a Mega (pins 19 RX / 18 TX)."
+#error "This board (" ARDUINO_BOARD ") needs RADAR_LINK_SERIAL1."
 #endif
-#endif
-
-#include <DFRobot_C4001.h>
-
-#if defined(ARDUINO_AVR_UNO) || defined(ESP8266)
-SoftwareSerial radarPort(RADAR_RX_PIN, RADAR_TX_PIN);
-DFRobot_C4001_UART radar(&radarPort, C4001_BAUD);
-#elif RADAR_LINK == RADAR_LINK_SERIAL1
-DFRobot_C4001_UART radar(&Serial1, C4001_BAUD);
+#if RADAR_LINK == RADAR_LINK_SERIAL1
+#define RADAR_PORT Serial1
 #elif RADAR_LINK == RADAR_LINK_SERIAL2
-DFRobot_C4001_UART radar(&Serial2, C4001_BAUD);
-#elif RADAR_LINK == RADAR_LINK_SERIAL3
-DFRobot_C4001_UART radar(&Serial3, C4001_BAUD);
+#define RADAR_PORT Serial2
 #else
-#error "Set RADAR_LINK to a hardware serial port."
+#define RADAR_PORT Serial3
+#endif
 #endif
 
-static Stream &radarLink() {
-#if defined(ARDUINO_AVR_UNO) || defined(ESP8266)
-  return radarPort;
-#elif RADAR_LINK == RADAR_LINK_SERIAL1
-  return Serial1;
-#elif RADAR_LINK == RADAR_LINK_SERIAL2
-  return Serial2;
-#elif RADAR_LINK == RADAR_LINK_SERIAL3
-  return Serial3;
-#endif
+static char gBuf[80];
+static uint8_t gLen = 0;
+static uint16_t gFrames = 0;
+static uint32_t gLastFrameMs = 0;
+static bool gTxOk = false;
+static bool gRxOk = false;
+
+static void drain() {
+  while (RADAR_PORT.available() > 0) {
+    const char c = (char)RADAR_PORT.read();
+    if (gLen + 1 >= sizeof(gBuf)) {
+      memmove(gBuf, gBuf + 24, gLen - 24);
+      gLen = (uint8_t)(gLen - 24);
+    }
+    gBuf[gLen++] = c;
+    gBuf[gLen] = 0;
+    if (c == '*') {
+      gFrames++;
+      gLastFrameMs = millis();
+      gTxOk = true;
+    }
+  }
 }
 
-static bool gConfigured = false;
-
-static bool probeRadar() {
-  Stream &link = radarLink();
-  while (link.available() > 0) {
-    link.read();
-  }
-  const char startCmd[] = "sensorStart";
-  link.write(reinterpret_cast<const uint8_t *>(startCmd), sizeof(startCmd) - 1);
+static bool waitAck(uint16_t timeoutMs) {
+  char tail[12];
+  uint8_t n = 0;
+  tail[0] = 0;
   const uint32_t startMs = millis();
-  while ((uint32_t)(millis() - startMs) < 2000UL) {
-    if (link.available() > 0 && link.read() == '$') {
-      return true;
+  while ((uint32_t)(millis() - startMs) < timeoutMs) {
+    while (RADAR_PORT.available() > 0) {
+      const char c = (char)RADAR_PORT.read();
+      if (n + 1 < sizeof(tail)) {
+        tail[n++] = c;
+      } else {
+        memmove(tail, tail + 1, sizeof(tail) - 2);
+        tail[sizeof(tail) - 2] = c;
+        n = sizeof(tail) - 1;
+      }
+      tail[n] = 0;
+      if (strstr(tail, "Done") != 0 || strstr(tail, "Error") != 0) {
+        return true;
+      }
     }
+    delay(2);
   }
   return false;
 }
 
-static void configureRadar() {
-  radar.setSensorMode(eSpeedMode);
-  radar.setDetectThres(RANGE_MIN_CM, RANGE_MAX_CM, RANGE_THRESHOLD);
-  radar.setFrettingDetection(eON);
-  gConfigured = true;
-  if (Serial.availableForWrite() > 16) {
-    Serial.println(F("ranging mode, raw values follow"));
+static bool roundTripRx() {
+  while (RADAR_PORT.available() > 0) {
+    RADAR_PORT.read();
+  }
+  RADAR_PORT.print(F("sensorStop"));
+  if (!waitAck(2000)) {
+    return false;
+  }
+  RADAR_PORT.print(F("sensorStart"));
+  waitAck(1000);
+  return true;
+}
+
+static void printResult() {
+  if (Serial.availableForWrite() < 24) {
+    return;
+  }
+  if (gTxOk && gRxOk) {
+    Serial.println(F("PASS tx+rx"));
+  } else if (!gTxOk) {
+    Serial.println(F("FAIL tx  no frames"));
+  } else {
+    Serial.println(F("FAIL rx  check sensor RX wire"));
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  // Shield may be stacked. Keep the SD card off the bus if one is fitted.
   pinMode(SD_CS_PIN, OUTPUT);
   digitalWrite(SD_CS_PIN, HIGH);
+  RADAR_PORT.begin(C4001_BAUD);
 
   if (Serial.availableForWrite() > 40) {
-    Serial.println(F("C4001 raw serial test, 115200"));
-#if RADAR_LINK == RADAR_LINK_SERIAL1
-    Serial.println(F("Sensor TX -> pin 19, sensor RX -> pin 18, 9600"));
-#elif RADAR_LINK == RADAR_LINK_SERIAL2
-    Serial.println(F("Sensor TX -> pin 17, sensor RX -> pin 16, 9600"));
-#elif RADAR_LINK == RADAR_LINK_SERIAL3
-    Serial.println(F("Sensor TX -> pin 15, sensor RX -> pin 14, 9600"));
-#else
-    Serial.println(F("Sensor TX -> D6, sensor RX -> D7, 9600"));
+    Serial.println(F("C4001 link test 115200"));
+#if RADAR_LINK == RADAR_LINK_SOFT
+    Serial.println(F("TX->D6 RX->D7  D4 held high"));
+#elif RADAR_LINK == RADAR_LINK_SERIAL1
+    Serial.println(F("TX->19 RX->18"));
 #endif
-    Serial.println(F("D4 is held HIGH (shield SD chip select)"));
   }
 
-  radar.begin();
-  if (probeRadar()) {
-    if (Serial.availableForWrite() > 24) {
-      Serial.println(F("frame seen, configuring (10-20 s)"));
-    }
-    configureRadar();
-  } else if (Serial.availableForWrite() > 24) {
-    Serial.println(F("no frame yet, check power and TX/RX"));
+  const uint32_t startMs = millis();
+  while ((uint32_t)(millis() - startMs) < 2000UL && !gTxOk) {
+    drain();
+    delay(5);
   }
+  gRxOk = roundTripRx();
+  gLastFrameMs = millis();
+  printResult();
 }
 
 void loop() {
-  static uint32_t lastMs = 0;
+  static uint32_t lastBeat = 0;
+  drain();
   const uint32_t now = millis();
-  if (!gConfigured) {
-    if ((uint32_t)(now - lastMs) < 2000UL) {
-      return;
+  if (gLastFrameMs != 0 && (uint32_t)(now - gLastFrameMs) > LINK_TIMEOUT_MS) {
+    if (Serial.availableForWrite() > 16) {
+      Serial.println(F("FAIL link"));
     }
-    lastMs = now;
-    if (!probeRadar()) {
-      if (Serial.availableForWrite() > 12) {
-        Serial.println(F("no frame"));
-      }
-      return;
-    }
-    if (Serial.availableForWrite() > 24) {
-      Serial.println(F("frame seen, configuring (10-20 s)"));
-    }
-    configureRadar();
+    gTxOk = false;
+    gLastFrameMs = now;
+  }
+  if ((uint32_t)(now - lastBeat) < 1000UL) {
     return;
   }
-  if ((uint32_t)(now - lastMs) < 300UL) {
+  lastBeat = now;
+  if (Serial.availableForWrite() < 20) {
     return;
   }
-  lastMs = now;
-  if (Serial.availableForWrite() < 40) {
-    return;
-  }
-
-  const uint8_t count = radar.getTargetNumber();
-  if (count == 0) {
-    Serial.println(F("clear"));
-    return;
-  }
-  Serial.print(F("targets="));
-  Serial.print(count);
-  Serial.print(F("  m="));
-  Serial.print(radar.getTargetRange(), 2);
-  Serial.print(F("  m/s="));
-  Serial.print(radar.getTargetSpeed(), 2);
-  Serial.print(F("  e="));
-  Serial.println(radar.getTargetEnergy());
+  Serial.print(F("hb frames="));
+  Serial.println(gFrames);
 }

@@ -35,11 +35,16 @@ void setup() {
   tft.fillScreen(ILI9341_BLACK);
   tft.setTextWrap(false);
 
-  tft.fillRect(0, 0, 240, 70, ILI9341_GREEN);
+  // ILI9341 register 0xD3 returns ... 0x93, 0x41 when MISO is connected.
+  const uint8_t idHi = tft.readcommand8(0xD3, 2);
+  const uint8_t idLo = tft.readcommand8(0xD3, 3);
+  const bool pass = idHi == 0x93 && idLo == 0x41;
+
+  tft.fillRect(0, 0, 240, 70, pass ? ILI9341_GREEN : ILI9341_RED);
   tft.setTextSize(4);
-  tft.setTextColor(ILI9341_BLACK);
-  tft.setCursor(48, 20);
-  tft.print(F("TFT OK"));
+  tft.setTextColor(pass ? ILI9341_BLACK : ILI9341_WHITE);
+  tft.setCursor(pass ? 60 : 48, 20);
+  tft.print(pass ? F("PASS") : F("FAIL"));
 
   tft.setTextSize(2);
   tft.setTextColor(ILI9341_WHITE);
@@ -60,8 +65,19 @@ void setup() {
   tft.fillRect(12, 190, 216, 40, ILI9341_BLACK);
   tft.drawRect(12, 190, 216, 40, ILI9341_WHITE);
   gLastMs = millis();
-  if (Serial.availableForWrite() > 16) {
-    Serial.println(F("tft test: D4 held high, no SD library"));
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setCursor(12, 168);
+  tft.print(F("ID "));
+  tft.print(idHi, HEX);
+  tft.print(idLo, HEX);
+
+  if (Serial.availableForWrite() > 24) {
+    Serial.print(F("tft "));
+    Serial.print(pass ? F("PASS") : F("FAIL"));
+    Serial.print(F(" id=0x"));
+    Serial.print(idHi, HEX);
+    Serial.println(idLo, HEX);
   }
 }
 

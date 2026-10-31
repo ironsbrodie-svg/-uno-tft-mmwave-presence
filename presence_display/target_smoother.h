@@ -2,84 +2,92 @@
 
 #include "target.h"
 
-// Handheld filter. The C4001 expects a fixed mount, so walking makes
-// still objects look like motion. This holds presence briefly, requires
-// a couple of hits before the banner flips on, and eases the range number
-// so the big digits do not flicker.
+// Handheld filter. A single miss does not wipe the enter score: hits add 2,
+// misses subtract 1. PRESENT latches at ENTER_READS * 2 (2 hits with the
+// default of 2). During the hold, distance stays and speed/energy are hidden
+// so a frozen walking speed is not left on screen.
 class TargetSmoother {
  public:
   TargetSmoother(uint16_t holdMs, uint8_t enterReads, uint8_t smoothDen,
-                 float jumpM)
+                 uint16_t jumpCm)
       : _holdMs(holdMs),
-        _enterReads(enterReads < 1 ? 1 : enterReads),
+        _need((uint8_t)((enterReads < 1 ? 1 : enterReads) * 2)),
         _den(smoothDen < 2 ? 2 : smoothDen),
-        _jumpM(jumpM),
+        _jumpCm(jumpCm),
         _latched(false),
-        _hits(0),
+        _score(0),
         _lastTrueMs(0),
         _haveRange(false),
-        _rangeM(0),
+        _rangeCm(0),
         _jumpHits(0),
-        _jumpRange(0),
+        _jumpCmSeen(0),
         _haveSpeed(false),
-        _speed(0),
+        _speedCms(0),
         _haveEnergy(false),
         _energy(0),
+        _count(0)
+#if CONE_DIRECTIONAL
+        ,
         _haveAngle(false),
         _angle(0),
         _havePos(false),
         _x(0),
-        _y(0),
-        _count(0) {}
+        _y(0)
+#endif
+  {
+  }
 
   void reset() {
     const uint16_t hold = _holdMs;
-    const uint8_t enter = _enterReads;
+    const uint8_t need = _need;
     const uint8_t den = _den;
-    const float jump = _jumpM;
-    *this = TargetSmoother(hold, enter, den, jump);
+    const uint16_t jump = _jumpCm;
+    *this = TargetSmoother(hold, (uint8_t)(need / 2), den, jump);
   }
 
   void apply(const TargetFix &in, TargetFix &out) {
     const uint32_t now = millis();
-
     if (in.present) {
       _lastTrueMs = now;
-      if (!_latched) {
-        if (_hits < 255) {
-          _hits++;
-        }
-        if (_hits >= _enterReads) {
-          _latched = true;
-        }
+      if (_score < 12) {
+        _score = (uint8_t)(_score + 2);
+      }
+      if (!_latched && _score >= _need) {
+        _latched = true;
       }
       if (_latched) {
-        if (in.count > 0) {
-          _count = in.count;
-        } else {
-          _count = 1;
-        }
+        _count = in.count ? in.count : 1;
         if (in.hasDistance) {
-          acceptRange(in.distanceM);
+          acceptRange(in.distanceCm);
         }
         if (in.hasSpeed) {
-          acceptSpeed(in.speedMps);
+          acceptSpeed(in.speedCms);
         }
         if (in.hasEnergy) {
           acceptEnergy(in.energy);
         }
+#if CONE_DIRECTIONAL
         if (in.hasAngle) {
-          acceptAngle(in.angleDeg);
+          _angle = in.angleDeg;
+          _haveAngle = true;
         }
         if (in.hasPosition) {
-          acceptPosition(in.xM, in.yM);
+          _x = in.xCm;
+          _y = in.yCm;
+          _havePos = true;
         }
+#endif
       }
     } else {
-      _hits = 0;
-      const bool coasting =
+      if (_score > 0) {
+        _score--;
+      }
+      const bool coast =
           _latched && (uint32_t)(now - _lastTrueMs) < _holdMs;
-      if (!coasting) {
+      if (coast) {
+        _haveSpeed = false;
+        _haveEnergy = false;
+      } else {
         clearLatch();
       }
     }
@@ -89,95 +97,73 @@ class TargetSmoother {
     out.present = _latched;
     out.count = _latched ? _count : 0;
     out.hasDistance = _latched && _haveRange;
-    out.distanceM = _rangeM;
+    out.distanceCm = _rangeCm;
     out.hasSpeed = _latched && _haveSpeed;
-    out.speedMps = _speed;
+    out.speedCms = _speedCms;
     out.hasEnergy = _latched && _haveEnergy;
     out.energy = _energy;
+#if CONE_DIRECTIONAL
     out.hasAngle = _latched && _haveAngle;
     out.angleDeg = _angle;
     out.hasPosition = _latched && _havePos;
-    out.xM = _x;
-    out.yM = _y;
+    out.xCm = _x;
+    out.yCm = _y;
+#endif
   }
 
  private:
-  static float blend(float previous, float sample, uint8_t den) {
-    return (previous * (float)(den - 1) + sample) / (float)den;
-  }
-
-  static float magnitude(float value) { return value < 0.0f ? -value : value; }
-
-  void acceptRange(float sample) {
-    if (sample < 0.05f || sample > 30.0f) {
+  void acceptRange(uint16_t sample) {
+    if (sample < 5 || sample > 3000) {
       return;
     }
     if (!_haveRange) {
-      _rangeM = sample;
+      _rangeCm = sample;
       _haveRange = true;
       _jumpHits = 0;
       return;
     }
-    const float delta = magnitude(sample - _rangeM);
-    if (delta <= _jumpM) {
+    const uint16_t delta =
+        sample > _rangeCm ? (uint16_t)(sample - _rangeCm)
+                          : (uint16_t)(_rangeCm - sample);
+    if (delta <= _jumpCm) {
       _jumpHits = 0;
-      _rangeM = blend(_rangeM, sample, _den);
+      _rangeCm = (uint16_t)((_rangeCm * (uint16_t)(_den - 1) + sample) / _den);
       return;
     }
-    // A single wild jump is ignored. Two samples that agree replace it.
-    if (_jumpHits == 0 || magnitude(sample - _jumpRange) > 0.4f) {
-      _jumpRange = sample;
+    const uint16_t jumpDelta =
+        sample > _jumpCmSeen ? (uint16_t)(sample - _jumpCmSeen)
+                             : (uint16_t)(_jumpCmSeen - sample);
+    if (_jumpHits == 0 || jumpDelta > 40) {
+      _jumpCmSeen = sample;
       _jumpHits = 1;
       return;
     }
     _jumpHits++;
     if (_jumpHits >= 2) {
-      _rangeM = sample;
+      _rangeCm = sample;
       _jumpHits = 0;
     }
   }
 
-  void acceptSpeed(float sample) {
-    if (magnitude(sample) > 15.0f) {
+  void acceptSpeed(int16_t sample) {
+    if (sample > 1500 || sample < -1500) {
       return;
     }
     if (!_haveSpeed) {
-      _speed = sample;
+      _speedCms = sample;
       _haveSpeed = true;
       return;
     }
-    _speed = blend(_speed, sample, _den);
+    _speedCms = (int16_t)((_speedCms * (int16_t)(_den - 1) + sample) / _den);
   }
 
-  void acceptEnergy(uint32_t sample) {
+  void acceptEnergy(uint16_t sample) {
     if (!_haveEnergy) {
       _energy = sample;
       _haveEnergy = true;
       return;
     }
-    _energy = (_energy * (uint32_t)(_den - 1) + sample) / _den;
-  }
-
-  // Fine for small swings. A wrap around +/-180 is not handled; the C4001
-  // never reports an angle, and a later driver can replace this.
-  void acceptAngle(float sample) {
-    if (!_haveAngle) {
-      _angle = sample;
-      _haveAngle = true;
-      return;
-    }
-    _angle = blend(_angle, sample, _den);
-  }
-
-  void acceptPosition(float x, float y) {
-    if (!_havePos) {
-      _x = x;
-      _y = y;
-      _havePos = true;
-      return;
-    }
-    _x = blend(_x, x, _den);
-    _y = blend(_y, y, _den);
+    _energy = (uint16_t)((_energy * (uint16_t)(_den - 1) + sample) / _den);
   }
 
   void clearLatch() {
@@ -185,34 +171,39 @@ class TargetSmoother {
     _haveRange = false;
     _haveSpeed = false;
     _haveEnergy = false;
-    _haveAngle = false;
-    _havePos = false;
     _count = 0;
     _jumpHits = 0;
-    _rangeM = 0;
-    _speed = 0;
+    _rangeCm = 0;
+    _speedCms = 0;
     _energy = 0;
+    _score = 0;
+#if CONE_DIRECTIONAL
+    _haveAngle = false;
+    _havePos = false;
+#endif
   }
 
   uint16_t _holdMs;
-  uint8_t _enterReads;
+  uint8_t _need;
   uint8_t _den;
-  float _jumpM;
+  uint16_t _jumpCm;
   bool _latched;
-  uint8_t _hits;
+  uint8_t _score;
   uint32_t _lastTrueMs;
   bool _haveRange;
-  float _rangeM;
+  uint16_t _rangeCm;
   uint8_t _jumpHits;
-  float _jumpRange;
+  uint16_t _jumpCmSeen;
   bool _haveSpeed;
-  float _speed;
+  int16_t _speedCms;
   bool _haveEnergy;
-  uint32_t _energy;
-  bool _haveAngle;
-  float _angle;
-  bool _havePos;
-  float _x;
-  float _y;
+  uint16_t _energy;
   uint8_t _count;
+#if CONE_DIRECTIONAL
+  bool _haveAngle;
+  int16_t _angle;
+  bool _havePos;
+  int16_t _x;
+  int16_t _y;
+#endif
 };

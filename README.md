@@ -1,83 +1,92 @@
-# human-presence-detector
+# -uno-tft-mmwave-presence
 
 Handheld presence display for an Arduino UNO R3, a 2.8" ILI9341 TFT shield, and a DFRobot C4001 24 GHz mmWave radar.
 
-The screen shows **PRESENT** or **CLEAR** in large type, a big distance, speed, energy, and a top-down picture of the radar beam. The C4001 reports distance, speed, and energy. It does not report a left/right angle, so the picture draws the person as a band across the whole beam at that distance. Details are in [Direction](#direction).
+The screen shows **PRESENT** or **CLEAR** in large type, a distance in meters, speed, and energy, plus a top-down picture of the beam. The C4001 reports distance, speed, and energy. It does not report a left/right angle, so the picture is a band across the whole beam. See [Direction](#direction).
 
-Repository: [github.com/ironsbrodie-svg/human-presence-detector](https://github.com/ironsbrodie-svg/human-presence-detector)
+Repository: [github.com/ironsbrodie-svg/-uno-tft-mmwave-presence](https://github.com/ironsbrodie-svg/-uno-tft-mmwave-presence)
 
 ## Parts
 
 | Part | Notes |
 | --- | --- |
-| Arduino UNO R3 | The sketches are built for `arduino:avr:uno`. |
-| 2.8" TFT shield, resistive touch, ILI9341 | Adafruit product 1651, or a clone with the same SPI wiring. Touch is not used. |
-| DFRobot C4001, UART | 25 m module is SEN0609. The 12 m module is SEN0610. Same library, same wiring. |
-| 4 jumper wires | Female ends for the shield's stacking pins. See colors below. |
+| Arduino UNO R3 | Sketches build for `arduino:avr:uno`. |
+| 2.8" TFT shield, resistive, ILI9341 | Adafruit product 1651, or a clone with the same SPI wiring. Touch is not used. |
+| DFRobot C4001, UART | 25 m module is SEN0609 (default in the sketch). 12 m module is SEN0610. |
+| 4 jumper wires | Female ends for the shield's stacking pins. |
 | USB cable | Programming, and the first power source. |
 
-The shield's microSD slot is unused. There is no SD library and no SD code. Digital pin 4 is still wired to the card's chip select, so the sketch drives D4 HIGH and that pin stays reserved.
+The microSD slot is unused. There is no SD library. Digital pin 4 is still the card's chip select, so every sketch drives D4 HIGH and that pin stays free of the radar.
 
 ## What the screen shows
 
-Portrait, USB connector at the top of the UNO. If the picture is upside down, set `TFT_ROTATION` to `2` at the top of `presence_display.ino`.
+Portrait, USB socket at the top of the UNO. If the picture is upside down, set `TFT_ROTATION` to `2` at the top of `presence_display/presence_display.ino`.
 
 | Region | Meaning |
 | --- | --- |
-| Green **PRESENT** / red **CLEAR** | Someone in the beam, or not. Letters are large on purpose so they read at arm's length. |
-| Yellow distance | Smoothed range in meters. `--` when the radar has no range. |
-| Cone | Top-down view. The sensor is the dot at the bottom and looks up the screen. A yellow arc is the range, stretched across the whole 100° beam. |
-| **RANGE ONLY** | The module did not provide a left/right position. |
-| SPEED / ENERGY | Relative speed and signal energy, in ranging mode. |
+| Green **PRESENT** / red **CLEAR** | Someone in the beam, or not. |
+| Yellow distance | Smoothed range, for example `6.0m`. `--` when there is no range. Presence mode shows `HERE`. |
+| Cone | Sensor at the bottom, looking up the screen. A yellow arc is the range across the full horizontal beam. The white number at the lower right is the configured maximum. |
+| SPEED / ENERGY | Relative speed (m/s) and signal energy, in ranging mode. Hidden while the presence hold is coasting. |
 
-`SEARCHING` means the sketch is listening for a `$` frame. `CONFIG` means it is writing the mode and range into the module. That step often takes 10–20 seconds because the DFRobot library saves each setting. `NO SENSOR` with `TX to D6` / `RX to D7` means no frame arrived.
+`SEARCHING` means the sketch is waiting for a `$...*` frame. `CHECKING` means it has stopped the module and is reading the settings back. That is every boot, on purpose. `NO SENSOR` means no frames (check power and the module TX wire). `NO RX` means frames arrived but the module did not answer a command (check the wire from the UNO's TX pin to the module RX). `CFG FAIL` names the command that did not return `Done`. Nothing was saved in that case.
 
-The display keeps updating with the USB cable unplugged from a computer. The sketch does not wait for the Serial Monitor.
+The display runs with no Serial Monitor. The sketch does not wait for USB.
 
 ## Wiring
 
-Do this with the USB cable unplugged.
+Do this with USB unplugged.
 
-The C4001's own Uno example uses D4 and D5. Do not copy that while this shield is on the board. D4 is the microSD chip select.
+DFRobot's own Uno example uses D4 and D5. Do not use those pins with this shield. D4 is the microSD chip select.
 
-### 1. Seat the shield
+### 1. UART / I2C switch
+
+The 12 m SEN0610 wiki tells you to set the DIP switch on the back of the sensor to **UART** before the serial demo (and to IIC for the I2C demo).
+
+The 25 m SEN0609 pinout is `VIN`, `GND`, `RX`, `TX`, `OUT`. A DFRobot forum report on that 25 m board says it has no DIP switch. If your board has the switch, set it to UART before power-up. If it has none, use the pins labeled RX and TX.
+
+### 2. Seat the shield
 
 1. Unplug USB and any barrel supply.
 2. Set the UNO on the table with the USB socket away from you.
-3. Hold the shield above it, display up, and line up every header. The shield's 2x3 plug must meet the UNO's ICSP header (the 2x3 pins near the middle of the UNO, not a header at the edge).
-4. Press straight down until the shield sits flush. Pins should be even on both long sides. A bent pin means pull the shield off and straighten it before trying again.
+3. Line the shield up with every header. Its 2x3 plug must meet the UNO's ICSP header (the 2x3 pins near the middle, not a header at the edge).
+4. Press straight down until the shield sits flush.
 
-Adafruit 1651 is built with stacking headers. The UNO's pins pass through the shield and stick up as male pins. The sensor wires go on those exposed pins.
+Adafruit 1651 uses stacking headers, so the UNO pins stick up as male pins. Put the sensor wires on those.
 
-If a clone shield has no pins sticking up, the headers are buried. Do not force wires between the two boards. Fit stacking headers, or use an Adafruit WingShield (product 196) so D6, D7, 5V, and GND stay reachable.
+If a clone has no pins sticking up, do not force wires between the boards. Fit stacking headers, or use an Adafruit WingShield (product 196).
 
-### 2. Connect the C4001
+### 3. Connect the C4001
 
-Match the silkscreen on the module (`VIN` or `VCC`, `GND`, `TX`, `RX`, `OUT`). A factory Gravity lead uses its own colors. Trust the labels on the module, then use the colors below for loose jumpers so the harness is easy to check later.
+Match the silkscreen (`VIN` or `VCC`, `GND`, `TX`, `RX`, `OUT`). A factory Gravity lead has its own colors. Trust the labels, then use the colors below on loose jumpers.
 
-| Order | Module pin | Wire | UNO pin (stacking header) |
+| Order | Module pin | Wire | UNO pin |
 | --- | --- | --- | --- |
 | 1 | GND | Black | GND |
-| 2 | TX | Yellow | D6 (UNO listens here) |
-| 3 | RX | Blue | D7 (UNO talks here) |
+| 2 | TX | Yellow | D6 (UNO listens) |
+| 3 | RX | Blue | D7 (UNO talks) |
 | 4 | VIN / VCC | Red | 5V |
 | — | OUT | Leave open | Not used |
 
-Connect GND first and 5V last. TX and RX cross: the module's TX talks to the UNO's receive pin.
+TX and RX cross: the module's TX talks to the UNO's receive pin.
 
 ```
           C4001                         UNO + TFT shield
-       (antenna faces                 (male pins on top
-        away from you)                 of the shield)
 
          VIN / VCC  ---- red --------  5V
          GND        ---- black ------  GND
-         TX         ---- yellow ------ D6     SoftwareSerial RX
-         RX         ---- blue -------- D7     SoftwareSerial TX
+         TX         ---- yellow ------ D6
+         RX         ---- blue -------- D7
          OUT        (no wire)
-
-         Do not use D0 D1 D2 D4 D9 D10 D11 D12 D13  or  A4 A5
 ```
+
+Power: the module is specified for a 3.3 V or 5 V supply. Use the UNO **5V** pin. The UNO 3.3 V pin is too small for the radar (about 90 mA) as well as the board.
+
+Logic level, stated carefully:
+
+- Confirmed: DFRobot's Uno examples connect the UART pins straight to 5 V GPIO, and the supply pin accepts 3.3 V or 5 V. Baud in those examples and in the product spec is 9600.
+- Not confirmed: whether the module RX pin is 5 V tolerant. No VIH / IO-voltage table was found for SEN0609 or SEN0610.
+- Cautious option, if you want a 3.3 V high into the module: 1 kΩ from UNO D7 to the module RX pin, and 2 kΩ from that RX pin to GND. That is about 3.3 V. Do not put that divider on the module TX wire. A 3.3 V output from the module into D6 is already a valid high for the UNO.
 
 ```mermaid
 flowchart LR
@@ -99,244 +108,235 @@ flowchart LR
   RX0 --- D7
 ```
 
-Power and logic: the module accepts 3.3 V or 5 V. Use the UNO **5V** pin. The UNO's 3.3 V pin cannot spare the radar's current (about 90 mA) on top of everything else. DFRobot's Uno examples connect the UART directly, with no level shifter, and this project does the same. Baud is 9600. The product specification lists 9600 as the default; the sketch opens 9600 to match `DFRobot_C4001`.
+### 4. Check before power
 
-### 3. Check before you power it
-
-- The shield is flush and the ICSP plug is seated.
-- The red wire is on **5V** only. It is not on VIN, 3.3V, or IOREF.
-- The black wire is on GND.
-- Module **TX** goes to **D6**. Module **RX** goes to **D7**.
-- Nothing is plugged into D0, D1, D4, or D9–D13.
-- OUT has no wire. Bare strands are not touching the next pin.
-- The microSD slot can stay empty. If a card is already in it, leave it; D4 is held high so the card stays off the SPI bus.
+- Shield flush, ICSP plug seated.
+- Red wire on **5V** only. Not VIN, not 3.3V, not IOREF.
+- Black wire on GND.
+- Module TX to D6. Module RX to D7.
+- Nothing on D0, D1, D4, or D9–D13.
+- OUT has no wire.
+- DIP switch on UART if the board has one.
+- MicroSD slot may stay empty. A card left in it stays off the bus because D4 is held high.
 
 Then plug in USB.
 
 ## Pins the shield already uses
 
-On an UNO, the 2x3 ICSP header and D11–D13 are the same SPI wires. A stock 1651 (SPI on the ICSP plug) and a shield jumpered over to D11–D13 both work on the UNO. They are not the same wires on a Mega. See [Migrating to Arduino Mega](#migrating-to-arduino-mega).
+On an UNO, the ICSP header and D11–D13 are the same SPI wires. A stock 1651 and a shield jumpered over to D11–D13 both work on the UNO. They are different wires on a Mega.
 
 | UNO pin | Shield function | This project |
 | --- | --- | --- |
-| D13 / ICSP SCK | SPI clock | Display. Hands off. |
-| D12 / ICSP MISO | SPI data in | Display. Hands off. |
-| D11 / ICSP MOSI | SPI data out | Display. Hands off. |
-| D10 | TFT chip select | Display. |
-| D9 | TFT data/command | Display. |
-| D4 | microSD chip select | Driven HIGH. Reserved. No SD library. |
-| D2 | Touch interrupt (TSC2007), if the TSIRQ jumper is closed | Leave the jumper as it arrived. Do not use D2. |
-| A4 / SDA, A5 / SCL | Touch controller I2C | Leave free. Touch is not read. |
-| D8 | Touch chip select on older STMPE610 shields only | Driven HIGH so an old touch chip stays off SPI. |
-| D3 | Backlight, only if the LITE/#3 jumper is soldered | Driven HIGH so the backlight stays on if that jumper is closed. |
+| D13 / ICSP SCK | SPI clock | Display |
+| D12 / ICSP MISO | SPI data in | Display |
+| D11 / ICSP MOSI | SPI data out | Display |
+| D10 | TFT chip select | Display |
+| D9 | TFT data/command | Display |
+| D4 | microSD chip select | Driven HIGH. Reserved. |
+| D2 | Touch interrupt, if the TSIRQ jumper is closed | Leave it. |
+| A4 / SDA, A5 / SCL | Touch controller I2C | Leave them. Touch is not read. |
+| D8 | Touch chip select on older STMPE610 shields | Driven HIGH. |
+| D3 | Backlight, only if the LITE/#3 jumper is closed | Driven HIGH so the backlight stays on. |
 | D6 | Free | SoftwareSerial RX. Sensor TX. |
 | D7 | Free | SoftwareSerial TX. Sensor RX. |
-| D0, D1 | USB serial | Left free so upload and the monitor still work. |
+| D0, D1 | USB serial | Left free for upload. |
 
-The UNO has one hardware UART, and it is the USB port. AltSoftSerial wants D8 and D9, and D9 is the TFT data/command pin, so it does not fit. SoftwareSerial on D6/D7 is the port that stays clear of the shield. Change that choice with one line when you move to a Mega (`RADAR_LINK`).
+The UNO's only hardware UART is USB. AltSoftSerial wants D8 and D9, and D9 is the TFT data/command pin. SoftwareSerial on D6/D7 is the free pair. `RADAR_LINK` at the top of the sketch is the one-line change for a Mega.
 
 ## Power
 
-Start from the computer's USB port. After the sketch is on the board it runs with no Serial Monitor and no computer.
+Start from the computer's USB port. After upload the sketch runs with no Serial Monitor and no computer.
 
-| Load | About | Where the number comes from |
+| Load | About | Source |
 | --- | --- | --- |
-| UNO R3 | 50 mA | MCU, USB interface, and LEDs, typical |
-| TFT shield, backlight full | 100 mA | Adafruit 1651 product page, display and touchscreen |
-| C4001 | 90 mA | DFRobot SEN0609 specification, operating current |
-| **Total** | **about 240 mA** | Use a supply that can deliver **500 mA** continuously |
-
-The backlight is most of the shield's draw. This sketch leaves it fully on so the panel stays readable in sun.
+| UNO R3 | 50 mA | MCU, USB chip, LEDs, typical |
+| TFT shield, backlight full | 100 mA | Adafruit 1651 product page |
+| C4001 | 90 mA | DFRobot SEN0609 operating current |
+| **Total** | **about 240 mA** | Use a supply that can deliver **500 mA** |
 
 ### USB, including a power bank
 
-Plug the bank or the PC into the UNO's USB-B socket. An official UNO fuses that input at 500 mA, and 240 mA sits inside that with margin. A bank that can supply 500 mA or more is enough. The board only draws what it needs.
+Plug the bank or the PC into the USB-B socket. An official UNO fuses that input at 500 mA. A bank rated 500 mA or more is enough.
 
-### Barrel jack or VIN, for a wall supply
+### Barrel jack or VIN
 
-Use **7–12 V DC**, center positive, and prefer **7–9 V**. The onboard regulator is linear: it turns `(Vin − 5 V) × current` into heat. At 9 V and 0.24 A that is about 1 W. At 12 V it is about 1.7 W and the regulator runs hot. Above 12 V is a poor match for this load.
+Use **7–12 V DC**, center positive, and prefer **7–9 V**. The onboard regulator is linear: `(Vin − 5 V) × current` becomes heat. At 9 V and 0.24 A that is about 1 W. At 12 V it is about 1.7 W.
 
-A 5 V adapter on the barrel jack or on VIN will not work. The regulator needs a couple of volts of headroom above 5 V. Five volts on VIN leaves the 5 V rail sagging and the board resets or runs brown-out.
+A 5 V adapter on the barrel jack or on VIN will not regulate to a solid 5 V rail. The regulator needs headroom above 5 V.
 
-You can leave a USB cable connected for the Serial Monitor while a barrel supply is plugged in. The UNO disconnects USB 5 V when VIN is present; the cable still carries data.
+You can leave USB connected for the Serial Monitor while a barrel supply is plugged in. The UNO disconnects USB 5 V when VIN is present. The cable still carries data.
 
-Do not tie a second 5 V supply into the 5 V header while the USB plug is also feeding the board from a computer. Those two 5 V sources fight.
+Do not feed a second 5 V supply into the 5 V header while the USB plug is also powering the board from a computer.
 
 ## Libraries
 
-Versions this repo was compiled against:
+The sketches talk to the C4001 directly. They do not link `DFRobot_C4001`. That library's `sensorStop()` waits forever for an echo, and every setter calls it. The command set in the sketch is the one documented for SEN0609 (sensorStop, get/set, saveConfig, sensorStart) with a timeout on each reply.
 
-| Library | Version | Used for |
-| --- | --- | --- |
-| Adafruit ILI9341 | 1.7.0 | TFT |
-| Adafruit GFX Library | 1.13.0 | Text and shapes |
-| Adafruit BusIO | 1.17.4 | Installed with GFX |
-| DFRobot_C4001 | 1.0.1 | SEN0609 / SEN0610 |
+Display libraries this tree was compiled against:
 
-ILI9341 also pulls in Adafruit STMPE610, Adafruit TouchScreen, and Adafruit TSC2007. Those are touch drivers. The sketches do not include them. Do not add an SD library; the flash image is already at 98% of the UNO.
+| Library | Version |
+| --- | --- |
+| Adafruit ILI9341 | 1.7.0 |
+| Adafruit GFX Library | 1.13.0 |
+| Adafruit BusIO | 1.17.4 |
 
-Arduino IDE: Library Manager, search each name, install those versions if you want a match.
-
-arduino-cli:
+ILI9341 also installs Adafruit STMPE610, TouchScreen, and TSC2007. The sketches do not include them. Do not add an SD library.
 
 ```bash
 arduino-cli core install arduino:avr
-arduino-cli lib install "Adafruit ILI9341@1.7.0" "Adafruit GFX Library@1.13.0" "DFRobot_C4001@1.0.1"
+arduino-cli lib install "Adafruit ILI9341@1.7.0" "Adafruit GFX Library@1.13.0"
 ```
 
-Board package used here: `arduino:avr` 1.8.8. CLI: arduino-cli 1.5.1.
+Board package used here: `arduino:avr` 1.8.8.
 
 ## Upload
 
-1. Install the libraries above.
+1. Install the display libraries.
 2. Tools → Board → **Arduino Uno**.
-3. Open `presence_display/presence_display.ino`. The folder name and the file name match.
-4. Select the UNO's port. Close the Serial Monitor if upload fails with "port busy".
-5. Upload. The radar is on D6/D7, so it does not block the bootloader on D0/D1.
-6. First boot shows `SEARCHING`, then `CONFIG` for up to about 20 seconds, then the live screen.
+3. Open `presence_display/presence_display.ino`.
+4. Select the port. Close the Serial Monitor if the port is busy.
+5. Upload. The radar is on D6/D7, so it does not block the bootloader.
+6. The TFT shows `SEARCHING` as soon as the panel initialises, then `CHECKING` while settings are read back.
 
-Optional log: Serial Monitor at **115200**. The sketch prints a short line when presence or the shown range changes, and only when the serial buffer has room, so a closed monitor does not stall the display.
+Optional log: Serial Monitor at **115200**. Lines are printed only when the USB buffer has room.
 
 ### Other sketches
 
 | Sketch | What it checks |
 | --- | --- |
-| `tft_test/tft_test.ino` | Shield only. Green **TFT OK**, color bars, a counter that repaints one box. D4 is held HIGH. |
-| `c4001_serial_test/c4001_serial_test.ino` | Radar only, raw numbers, no smoothing. Monitor at 115200. Same D6/D7 wiring. D4 is held HIGH. |
+| `tft_test/tft_test.ino` | Reads ILI9341 ID register 0xD3. **PASS** when the bytes are 93 41. Counter repaints one box. D4 held HIGH. |
+| `c4001_serial_test/c4001_serial_test.ino` | Radar only. Prints `PASS tx+rx` or `FAIL tx` / `FAIL rx`. Heartbeat `hb frames=N` once a second. Does not save settings. |
+| `bringup_test/bringup_test.ino` | TFT ID and the radar TX/RX round trip on one screen. |
 
-Run `tft_test` when the panel stays white. Run the serial test when the main sketch sits on `NO SENSOR`. `no frame` in that test means power or TX/RX. `clear` after `ranging mode` means the link is up and the beam is empty.
+### Sensor unplugged mid-run
 
-## Settings at the top of the sketch
+This was not run on hardware here. The procedure:
 
-Everything you should turn lives at the top of `presence_display/presence_display.ino`.
+1. Upload `presence_display` and wait until the banner is PRESENT or CLEAR.
+2. Unplug the yellow wire (module TX to D6), or unplug the module.
+3. Within about 2 seconds the banner should leave PRESENT/CLEAR and show NO SENSOR. It should not stay on CLEAR.
+4. Plug the wire back. The sketch probes again, checks settings, and returns to the live screen. It should not sit on CHECKING forever, and it should not show NO RX unless the D7 wire is the one that's open.
 
-### Indoor and outdoor
+## Settings
 
-`RADAR_PRESET` selects the gate:
+All of these are at the top of `presence_display/presence_display.ino`.
 
-| Preset | Range | Threshold | Why |
-| --- | --- | --- | --- |
-| `PRESET_INDOOR` (default) | 0.6–6 m | 22 | A long gate sees through interior walls. 24 GHz also bounces off metal, mirrors, and large glass. Six meters covers a room and cuts a lot of that. |
-| `PRESET_OUTDOOR` | 0.6–15 m | 12 | More distance. Wind-moved foliage and rain can look like a person; raise `RANGE_THRESHOLD` if the banner chatters. |
+### Model and preset
 
-The threshold is the ranging-mode factor (`setThrFactor`). A larger number asks for a stronger, larger return. Edit the numbers inside the active `#if` block for a custom gate. Ranging mode on the 25 m module accepts up to about 2500 cm. Keep a 12 m SEN0610 at or below 1200 cm.
+`C4001_MODEL` is `C4001_MODEL_25M` (2500 cm cap) or `C4001_MODEL_12M` (1200 cm cap). The active preset is clipped to that cap.
 
-DFRobot notes that distance on this module is a guide, not a calibrated measurement, and that there is about a meter of transition past the configured maximum.
+| Preset | Range | Threshold |
+| --- | --- | --- |
+| `PRESET_INDOOR` (default) | 0.6–6 m | 22 |
+| `PRESET_OUTDOOR` | 0.6–15 m | 12 |
 
-Outdoors in sun the backlight stays fully on and the banner is black-on-green or white-on-red. Shade the panel with a hand if it still washes out. Indoors, the same layout is just high contrast.
+Threshold is the ranging-mode factor. Larger means a stronger return is required. Indoor walls reflect 24 GHz, so the short gate is the default. Outdoors, wind-moved foliage and rain can chatter the banner; raise the threshold if they do. In sun the backlight stays fully on.
 
-### Handheld use
+DFRobot says the distance figure is a guide, not a calibrated measurement, and that there is about a meter of transition past the configured maximum.
 
-The C4001 is designed to be mounted still. In your hand, your own walking makes stationary objects look like they are moving, so speed includes your pace and the range can wander. Readings are most trustworthy when you stop and hold the unit steady for a second.
+Beam angle, from the product pages:
 
-Aim the antenna away from your body, roughly level or a little upward. The beam is about **100° wide and 40° tall**. Pointed level from chest height, the lower edge meets the ground a few meters ahead, and the sides take in nearby walls.
+| Module | Horizontal | Vertical |
+| --- | --- | --- |
+| SEN0609, 25 m | 100° | 40° |
+| SEN0610, 12 m | 100° | 80° |
 
-These knobs are the handheld filter, also at the top of the sketch:
+The drawing uses the shared 100° width. The vertical angle is not on the screen.
+
+### Handheld
+
+This radar is meant to be mounted still. Walking makes stationary objects look like motion, so the speed includes your pace. Readings are most trustworthy when you stop and hold the unit steady.
+
+Aim the antenna away from your body, level or a little up. Pointed level from chest height, the lower edge of the beam meets the ground a few meters ahead.
 
 | Define | Default | Effect |
 | --- | --- | --- |
-| `PRESENCE_HOLD_MS` | 1600 | PRESENT stays this long after the radar drops out, so the banner does not flicker. |
-| `PRESENCE_ENTER_READS` | 2 | Consecutive hits required before PRESENT appears. Use 1 for a snappier response. |
-| `DISTANCE_SMOOTH_DEN` | 4 | Each new sample is 1/4 of the number on screen. Higher is smoother and slower. |
-| `DISTANCE_JUMP_M` | 1.5 | A single range jump larger than this is ignored until a second sample agrees. |
-| `FRETTING_DETECTION` | 1 | Micro-motion on, so a still person can show up when you are still. Set to 0 to cut false hits while walking; a motionless person is then easier to miss. |
+| `PRESENCE_HOLD_MS` | 1600 | PRESENT stays this long after a real clear frame. |
+| `PRESENCE_ENTER_READS` | 2 | Hits add 2 to a score, misses subtract 1. PRESENT latches at 4, so one miss does not wipe two hits. |
+| `DISTANCE_SMOOTH_DEN` | 4 | Each new sample is 1/4 of the number on screen. |
+| `DISTANCE_JUMP_CM` | 150 | A single step larger than this waits for a second sample. |
+| `FRETTING_DETECTION` | 1 | Micro-motion on, so a still person can register when you are still. |
+| `LINK_TIMEOUT_MS` | 2000 | No complete frame for this long is a dead link, not an empty room. |
 
-`RADAR_MODE` defaults to ranging, which is the mode that fills in distance, speed, and energy. `RADAR_MODE_PRESENCE` is the "someone is here, including someone standing still" mode. That mode has no range, so the big number becomes **IN BEAM** and the cone has no distance arc. In that mode the extra knobs are `TRIG_SENSITIVITY` and `KEEP_SENSITIVITY` (0–9, higher is more sensitive, datasheet default 7; handheld starts at 4) and `TRIG_DELAY_UNITS` / `KEEP_DELAY_UNITS` (0.2 s to accept a target, 4 s to hold it).
+`RADAR_MODE_RANGING` (default) has distance, speed, and energy. `RADAR_MODE_PRESENCE` reports someone in the beam, including someone standing still, and has no range. In that mode the extra knobs are `TRIG_SENSITIVITY`, `KEEP_SENSITIVITY` (0–9, higher is more sensitive), and the latency units above.
+
+Every boot the sketch stops the module, reads the settings back, and writes them only when a value differs. The datasheet says a change does not take effect and does not survive a restart unless `saveConfig` is sent. One `saveConfig` is sent after a real change, and only after each `set` command has returned `Done`. A failed command does not save. Unsaved commands are not treated as "good enough"; the datasheet says they do not take effect.
+
+## Boot time
+
+Not measured on a bench. Estimated from the code.
+
+The previous sketch called `DFRobot_C4001`, which waits a fixed 1 s in `begin()` on the Uno and a fixed 1 s inside every `sensorStop()`. A full configure called that stop three times, so a normal boot was on the order of 7–11 s, and a missing RX wire never returned.
+
+This sketch:
+
+- Draws `SEARCHING` as soon as `tft.begin()` returns. There is no added splash delay.
+- Sends no configuration until a real frame has arrived, so a module that just powered up is not written to before it is already transmitting. The datasheet's "wait 1 s after power before parameter commands" is covered by that, rather than by a blind sleep after the frame.
+- The "you can check for a response after 3 s" line is why a missing sensor is not declared until the 2 s listen plus a 1 s `sensorStart` attempt (no flash write) have both failed.
+- Still stops the module and reads the settings back on every boot. That check was not removed to make boot faster.
+- Waits for `Done` or `Error` instead of the library's fixed 1 s pause, and does not send the next command before that reply. Timeouts are caps (0.8 s for a get/set, 2 s for stop and `saveConfig`), not extra delays after `Done`.
+- Does not call `resetSystem` or `resetCfg`.
+
+When the settings already match, expect the check to finish a few seconds after the first frame, mostly in the module's own replies. When something differs, add those `set` commands and one `saveConfig`. The presence hold and the sensitivity numbers were not shortened.
 
 ## Direction
 
 The C4001 does not output a left/right angle.
 
-The SEN0609 datasheet, section 3.2, defines the ranging sentence as `$DFDMD,par1,par2,par3,par4,par5,par6,par7*`:
+The SEN0609 datasheet, section 3.2, defines `$DFDMD` as target count, target id, distance, speed, energy, and two reserved fields. `$DFHPD` is a yes/no flag plus reserved fields. `DFRobot_C4001` stores only count, range, speed, and energy.
 
-| Field | Contents |
-| --- | --- |
-| par1 | Target count, 0 or 1 |
-| par2 | Target id |
-| par3 | Distance, meters |
-| par4 | Speed, m/s |
-| par5 | Energy |
-| par6, par7 | Reserved placeholders |
+The on-screen arc is that distance across the whole 100° beam.
 
-`DFRobot_C4001` stores only count, range, speed, and energy (`sPrivateData_t`). The presence sentence `$DFHPD` is a yes/no flag plus reserved fields. The beam specification is 100° by 40°, which is the width of the cone, not a position inside it.
+`presence_display/future/directional_view.h` draws a bearing dot from `hasAngle` or x/y. The UNO sketch does not include it (`CONE_DIRECTIONAL` is 0), so it is not in the UNO binary. A Mega build sets `CONE_DIRECTIONAL` to 1. An HLK-LD2450 driver is not included. Its default baud is 256000. SoftwareSerial on the UNO cannot keep up with that, and it can listen to only one port. On a Mega, put the C4001 on Serial1 and a future LD2450 on Serial2 (module TX to pin 17, module RX to pin 16).
 
-The screen therefore draws a **distance band across the whole cone**. A dot on that band would be a guess. The drawing code will place a dot when a reading sets `hasAngle` or `hasPosition` on `TargetFix`. The C4001 driver leaves both false.
+## Buffers
 
-Hardware that actually reports direction:
+| Buffer | Size | Why it is enough |
+| --- | --- | --- |
+| SoftwareSerial RX | 64 bytes, fixed in the library | At 9600 baud that is about 67 ms of data. The loop drains every 40 ms, about 38 bytes, so the ISR buffer is not left to overflow. A sketch `#define` does not resize it. |
+| Frame assembly | 80 bytes | A ranging frame is under 50 bytes. 80 bytes holds one frame plus the start of the next, so the newest complete `$...*` can be kept. Longer junk is dropped, not parsed. |
+| One parsed line | 56 bytes, stack, only while parsing | Shorter than the assembly buffer on purpose. An over-long frame is discarded. |
+| Command reply | 80 bytes, stack, only during CHECKING | A flushed get/set reply (`Response ... Done`) fits. The front of the buffer is kept so `Response` is not slid away before `Done`. |
 
-- A radar that outputs X/Y, such as the HLK-LD2450.
-- Two C4001 modules as a coarse pair. That is not implemented here, and one UNO cannot listen to two of them reliably. See below.
-
-## Future: adding direction tracking
-
-The UI already takes a generic `TargetFix` (presence, distance, speed, energy, optional angle, optional x/y). `PresenceSensor` is the small driver interface (`begin`, `probe`, `configure`, `read`, plus what the sensor is able to report). A new file can implement that class for another radar. The cone and the text do not need to be rewritten. This repo does not include an LD2450 driver.
-
-UNO limits if you add one later:
-
-- SoftwareSerial can listen on one port at a time. Bit-banged receive is reliable around 9600. It is a poor fit at 115200 and it will not keep up with the LD2450's default **256000** baud.
-- The UNO's only hardware UART is USB (D0/D1).
-- A Mega 2560 (four hardware UARTs) or another board with extra hardware serial ports is the practical host. Put the C4001 on Serial1 and the LD2450 on Serial2. See the next section for the pins.
-
-`TargetFix` is a single target. A multi-target radar can report the nearest one.
+`TargetFix` on the UNO is integers (centimeters, cm/s, energy). The angle and x/y fields are compiled only with `CONE_DIRECTIONAL`.
 
 ## Migrating to Arduino Mega
 
-Stay on the UNO until you need a second, fast UART. When you move:
-
-1. Tools → Board → **Arduino Mega or Mega 2560** (`arduino:avr:mega`).
-
-2. Shield SPI. On the Mega, hardware SPI is D50 (MISO), D51 (MOSI), D52 (SCK), and D53 (SS). The 2x3 ICSP header in the **middle of the Mega** (the ATmega2560's header, the one an Uno shield plugs into) is that same SPI port. The second ICSP header up by the USB socket belongs to the USB chip. Do not use that one.
-   - A stock 1651 talks SPI through the ICSP plug. Leave those jumpers. `TFT_CS` stays 10 and `TFT_DC` stays 9. The sketch already uses the board's hardware SPI, so the TFT constructor does not change.
-   - If someone cut the ICSP jumpers and soldered the shield's SPI onto digital 11, 12, and 13, those pins are **not** SPI on a Mega. Move the jumpers back to ICSP.
-   - D4 is still the microSD chip select and stays driven HIGH. D2 is still the touch interrupt. I2C moves to the SDA/SCL pins beside AREF (Mega D20/D21), which the shield already uses. This project still does not read touch.
-
-3. Move the C4001 to a hardware UART. In `presence_display/presence_display.ino` change one line:
-
-   ```cpp
-   #define RADAR_LINK RADAR_LINK_SERIAL1
-   ```
-
-   Change the same line in `c4001_serial_test/c4001_serial_test.ino` if you use that test. Building a Mega sketch while `RADAR_LINK` is still `RADAR_LINK_SOFT` stops with `#error`, because `DFRobot_C4001` on a Mega only constructs a hardware serial port.
-
-   | Signal | Mega pin |
-   | --- | --- |
-   | Sensor TX → board RX1 | 19 |
-   | Sensor RX ← board TX1 | 18 |
-   | VIN | 5V |
-   | GND | GND |
-
-   D6 and D7 are then free. Baud stays 9600 (`C4001_BAUD`).
-
-4. A future LD2450 goes on **Serial2**: sensor TX to pin 17 (RX2), sensor RX to pin 16 (TX2), at 256000 baud, in a new `PresenceSensor` class. Leave the C4001 on Serial1. `RADAR_LINK_SERIAL2` exists so the C4001 itself can be moved if Serial1 is taken; it is not an LD2450 driver.
-
-5. Power advice is the same. A Mega's own draw is a little higher than an UNO's; a 500 mA supply still covers this shield and radar.
+1. Tools → Board → **Arduino Mega or Mega 2560**.
+2. Shield SPI on the Mega is D50 (MISO), D51 (MOSI), D52 (SCK). The ICSP header in the **middle** of the Mega is that SPI port. The ICSP header by the USB socket is the USB chip. A stock 1651 uses the middle ICSP plug. `TFT_CS` stays 10 and `TFT_DC` stays 9. A shield whose SPI jumpers were moved to D11–D13 will not see SPI on a Mega until those jumpers go back to ICSP. D4 is still the SD chip select and stays HIGH.
+3. In `presence_display.ino` change one line to `#define RADAR_LINK RADAR_LINK_SERIAL1`. Do the same in `c4001_serial_test.ino` if you use it. Sensor TX goes to pin 19, sensor RX to pin 18.
+4. For the directional overlay, set `#define CONE_DIRECTIONAL 1` as well. Leave Serial2 free for a later LD2450.
+5. Building a Mega sketch while `RADAR_LINK` is still `RADAR_LINK_SOFT` stops with `#error` and the board name.
 
 ## Troubleshooting
 
 | What you see | What to check |
 | --- | --- |
-| White or blank TFT | Reseat the shield, especially the ICSP plug. Run `tft_test`. Try `TFT_ROTATION` 2. |
+| White TFT, or `tft_test` prints FAIL | Reseat the shield, including ICSP. PASS needs ID bytes 93 41. |
 | Picture upside down | `TFT_ROTATION` 2. |
-| `NO SENSOR` / serial test prints `no frame` | 5V and GND, then TX/RX. Module TX must be on D6. Baud 9600. |
-| Stuck on `CONFIG` | The library waits until the module answers `sensorStop`. A TX wire with no RX wire can pass the search (the UNO hears `$`) and then wait forever. Power-cycle the sensor. Both signal wires have to be there. |
-| Banner flickers while you walk | Expected. Hold still. Lengthen `PRESENCE_HOLD_MS`, raise `PRESENCE_ENTER_READS`, or set `FRETTING_DETECTION` to 0. |
-| Ghosts indoors | You are seeing a wall or the next room. Use `PRESET_INDOOR` or shorten `RANGE_MAX_CM`. |
+| `NO SENSOR` / serial test `FAIL tx` | 5V, GND, module TX to D6, DIP switch on UART if there is one. |
+| `NO RX` / serial test `FAIL rx` | UNO D7 to module RX. Frames prove the other direction works. |
+| `CFG FAIL` and a command name | That command did not return `Done`. Settings were not saved. Power-cycle the module and check the wiring. |
+| `FAIL link` or NO SENSOR after it was working | The TX wire or the module dropped. Plug it back; the sketch probes again. |
+| Banner flickers while you walk | Expected. Hold still. Lengthen `PRESENCE_HOLD_MS` or set `FRETTING_DETECTION` to 0. |
+| Ghosts indoors | Shorten `RANGE_MAX_CM` or stay on `PRESET_INDOOR`. |
 | Chatter outdoors in wind or rain | Raise `RANGE_THRESHOLD`. |
-| Range looks wrong | The datasheet says this distance is not calibrated. Treat it as a guide. Very close targets (under about 1 m) are weak on this module. |
+| Range looks wrong | DFRobot says it is not calibrated. Targets under about 1 m are weak. |
 | Upload fails | Close the Serial Monitor. The radar should not be on D0/D1. |
-| Backlight off | The LITE/#3 jumper was closed and D3 was low. This sketch drives D3 HIGH. Leave that jumper open unless you want GPIO control. |
-| SPI garbage with a card installed | D4 is already held HIGH. Remove the card if the display still misbehaves. Do not add SD code; there is no flash left for it. |
+| Backlight off | LITE/#3 was closed. This sketch drives D3 HIGH. |
 
 ## Compile check
 
-Compiled with arduino-cli 1.5.1, `arduino:avr` 1.8.8, for `arduino:avr:uno`:
+arduino-cli, `arduino:avr` 1.8.8.
 
-| Sketch | Flash | RAM globals |
-| --- | --- | --- |
-| `presence_display` | 31706 bytes (98% of 32256) | 1109 bytes (54%), 939 bytes left for stack and heap |
-| `tft_test` | 12470 bytes (38%) | 450 bytes (21%) |
-| `c4001_serial_test` | 14122 bytes (43%) | 586 bytes (28%) |
+| Sketch | Board | Flash | RAM globals |
+| --- | --- | --- | --- |
+| `presence_display` before this pass | Uno | 31706 bytes (98%) | 1109 bytes (54%) |
+| `presence_display` | Uno | 25124 bytes (77%) | 1066 bytes (52%) |
+| `tft_test` | Uno | 12942 bytes (40%) | 450 bytes (21%) |
+| `c4001_serial_test` | Uno | 4644 bytes (14%) | 408 bytes (19%) |
+| `bringup_test` | Uno | 14130 bytes (43%) | 559 bytes (27%) |
+| `presence_display`, `RADAR_LINK_SERIAL1` | Mega | 25018 bytes (9%) | 1106 bytes |
+| same, plus `CONE_DIRECTIONAL 1` | Mega | 26302 bytes (10%) | 1119 bytes |
 
-A Mega build with `RADAR_LINK` set to `RADAR_LINK_SERIAL1` also compiles (`presence_display` about 31540 bytes, 12% of the Mega). The copy in this repo stays on `RADAR_LINK_SOFT` for the UNO.
-
-The main image is tight because the official C4001 library and Adafruit GFX both land in the 32 KB. Leave out SD, touch, and custom fonts.
+The UNO image does not contain `dirSin256` / the directional overlay. The Mega image with `CONE_DIRECTIONAL 1` does. Adafruit BusIO still links the Wire library; that is the display stack, not the radar driver. Flash is at 77%, so that was left as-is.
