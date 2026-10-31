@@ -392,7 +392,7 @@ arduino-cli, `arduino:avr` 1.8.8.
 | `bringup_test` | Uno | 14122 bytes (43%) | 559 bytes (27%) |
 | `self_test` | Uno | 13874 bytes (43%) | 566 bytes (27%) |
 | `serial_passthrough` | Uno | 3190 bytes (9%) | 305 bytes (14%) |
-| `presence_display` | Nano (328P) | 26456 bytes (86% of 30720) | 1090 bytes |
+| `presence_display` | Nano (328P) | 26474 bytes (86% of 30720) | 1090 bytes |
 | `presence_display`, `RADAR_LINK_SERIAL1` | Mega | 26376 bytes (10%) | 1130 bytes |
 | same, plus `CONE_DIRECTIONAL 1` | Mega | 27590 bytes (10%) | 1143 bytes |
 
